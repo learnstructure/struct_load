@@ -136,6 +136,29 @@ pytest struct_load/tests -v
 
 ---
 
+## Examples Suite
+
+The [`examples/`](examples/) directory contains standalone, runnable scripts demonstrating every capability of `struct_load`:
+
+| Script | Description |
+|---|---|
+| [`01_asce7_code_lookups.py`](examples/01_asce7_code_lookups.py) | ASCE 7 occupancy live load lookups, partition allowances, live load reduction, flat roof snow, and minimum roof live loads. |
+| [`02_tributary_and_area_loads.py`](examples/02_tributary_and_area_loads.py) | 1D tributary strips, 2-way slab 45° yield-line distributions (moment and shear equivalents), and automated `AreaLoad` to beam distribution on a 3D bay. |
+| [`03_self_weight_engine.py`](examples/03_self_weight_engine.py) | Section area and linear self-weight calculations in SI and US units, 2D plane frame (-Y) and 3D space frame (-Z) self-weight materialization. |
+| [`04_seismic_elf_procedure.py`](examples/04_seismic_elf_procedure.py) | ASCE 7 Section 12.8 Equivalent Lateral Force (ELF) procedure, $T_a$, $C_s$, exact model-derived story seismic weights $W_i$, and story shears. |
+| [`05_wind_mwfrs_procedure.py`](examples/05_wind_mwfrs_procedure.py) | ASCE 7 Chapter 27 MWFRS directional wind procedure, velocity pressure $q_z$, exposure coefficient $K_z$ profiles (B, C, D), and story wind forces. |
+| [`06_factored_load_combinations.py`](examples/06_factored_load_combinations.py) | ASCE 7 / ACI 318 LRFD and ASD combinations generator, and 3D orthogonal seismic combinations ($1.0E_X \pm 0.3E_Y$ and $0.3E_X \pm 1.0E_Y$). |
+| [`07_end_to_end_building_loading.py`](examples/07_end_to_end_building_loading.py) | Complete automated loading pipeline on a 3-story concrete building project using `LoadGenerator`. |
+| [`run_all.py`](examples/run_all.py) | Master runner executing all examples sequentially. |
+
+To run all examples:
+```bash
+conda activate structeng
+python struct_load/examples/run_all.py
+```
+
+---
+
 ## Architecture Compliance
 
 - **Inputs**: Reads `struct_core.StructuralModel` (nodes, elements, sections, materials).

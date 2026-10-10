@@ -62,8 +62,9 @@ def distribute_tributary_load(
         return -mag, 0.0, 0.0
     elif d in ("+x", "x+"):
         return mag, 0.0, 0.0
-    # Fallback default
-    return 0.0, 0.0, -mag
+    raise ValueError(
+        f"Invalid load direction: '{direction}'. Expected '-z', '+z', '-y', '+y', '-x', or '+x'."
+    )
 
 
 def distribute_1d_tributary(

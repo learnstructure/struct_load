@@ -7,7 +7,7 @@ multi-directional lateral loads, roof snow and live loads, and area load distrib
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from struct_core import (
     DistributedLoad,
     LoadCase,
@@ -207,7 +207,9 @@ class LoadGenerator:
 
         elevations = self.detect_story_elevations(model)
         if not elevations:
-            elevations = [3.5]
+            raise ValueError(
+                "No story elevations detected in model. Ensure horizontal beams or floor nodes exist."
+            )
         roof_elevation = elevations[-1]
 
         created_cases: Dict[str, LoadCase] = {}
@@ -376,14 +378,24 @@ class LoadGenerator:
             if area <= 0.0:
                 continue
 
-            rho = getattr(mat, "rho", 2400.0 if unit_sys == "si" else 150.0)
-            if unit_sys == "si":
-                w_unit = (rho * area * g_accel) / 1000.0  # kN/m
+            unit_weight = getattr(mat, "unit_weight", None)
+            if unit_weight is not None and unit_weight > 0.0:
+                w_unit = unit_weight * area
             else:
-                if rho > 1.0:
-                    w_unit = (rho / 1728.0) * area if g_accel > 100.0 else (rho * (area / 144.0)) / 1000.0
+                rho = getattr(mat, "rho", None)
+                if rho is None or rho <= 0.0:
+                    rho = 2400.0 if unit_sys == "si" else 150.0
+
+                if unit_sys == "si":
+                    w_unit = (rho * area * g_accel) / 1000.0  # kN/m
                 else:
-                    w_unit = rho * g_accel * area
+                    if rho > 1.0:
+                        if g_accel > 100.0:
+                            w_unit = (rho / 1728.0) * area / 1000.0  # kip/in
+                        else:
+                            w_unit = (rho * (area / 144.0)) / 1000.0  # kip/ft
+                    else:
+                        w_unit = rho * g_accel * area
 
             length = get_beam_length(elem, nodes_map)
             total_w = float(w_unit) * length
@@ -428,20 +440,18 @@ class LoadGenerator:
 
         elevations = story_elevations or self.detect_story_elevations(model)
         if not elevations:
-            elevations = [3.5]
+            raise ValueError(
+                "No story elevations detected in model. Specify story_elevations or ensure model geometry has defined floor levels."
+            )
 
         # Calculate exact story weights from model dead loads & sections
         exact_weights = self.calculate_model_seismic_weight(model, elevations)
 
-        # Fallback if model has zero defined dead loads/sections
+        # Ensure model has defined dead loads/sections
         if sum(exact_weights) <= 1e-3:
-            x_coords = [n.x for n in model.nodes]
-            span_length = max(x_coords) - min(x_coords) if x_coords else 6.0
-            default_floor_pressure = 5.0 if unit_sys == "si" else 100.0  # 5 kPa or 100 psf
-            exact_weights = [
-                round(default_floor_pressure * span_length * tributary_width, 2)
-                for _ in elevations
-            ]
+            raise ValueError(
+                "Model has zero effective seismic weight W. Ensure dead load cases, member sections, or materials are defined on the model."
+            )
 
         params = SeismicParameters(
             sds=sds,
@@ -534,7 +544,9 @@ class LoadGenerator:
 
         elevations = story_elevations or self.detect_story_elevations(model)
         if not elevations:
-            elevations = [3.5]
+            raise ValueError(
+                "No story elevations detected in model. Specify story_elevations or ensure model geometry has defined floor levels."
+            )
 
         story_heights = []
         prev_h = 0.0
@@ -634,8 +646,10 @@ class LoadGenerator:
         eq_x_id = next((cid for cid in case_ids if ("eq" in str(cid).lower() or "seis" in str(cid).lower()) and "y" not in str(cid).lower()), None)
         eq_y_id = next((cid for cid in case_ids if ("eq" in str(cid).lower() or "seis" in str(cid).lower()) and "y" in str(cid).lower()), None)
 
-        if not dead_id and model.load_cases:
-            dead_id = model.load_cases[0].id
+        if not dead_id:
+            raise ValueError(
+                "Dead load case not found. ASCE 7 / ACI 318 combinations require a defined dead load case (e.g. 'Dead' or containing 'dead')."
+            )
 
         combs = generate_asce7_combinations(
             dead_case_id=dead_id or "Dead",

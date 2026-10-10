@@ -203,8 +203,10 @@ def lookup_occupancy(query: str) -> OccupancyLiveLoad:
         if key in norm or norm in key:
             return val
 
-    # Default to office
-    return _OCCUPANCY_DATABASE["office"]
+    raise KeyError(
+        f"Occupancy '{query}' not found in ASCE 7 database. "
+        f"Valid occupancy keys include: {list(_OCCUPANCY_DATABASE.keys())}."
+    )
 
 
 def get_occupancy_live_load(

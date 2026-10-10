@@ -37,13 +37,17 @@ def calculate_kz(z: float, exposure: str = "B", unit_system: str = "si") -> floa
     z_m = z if unit_system.lower() == "si" else z * 0.3048
     z_eff = max(4.57, z_m)  # Min height 15 ft (~4.57 m)
 
-    exp = exposure.upper()
+    exp = exposure.upper().strip()
     if exp == "B":
         alpha, zg = 7.0, 365.76
+    elif exp == "C":
+        alpha, zg = 9.5, 274.32
     elif exp == "D":
         alpha, zg = 11.5, 213.36
-    else:  # 'C' default
-        alpha, zg = 9.5, 274.32
+    else:
+        raise ValueError(
+            f"Invalid exposure category '{exposure}'. ASCE 7 specifies exposure categories 'B', 'C', or 'D'."
+        )
 
     kz = 2.01 * ((z_eff / zg) ** (2.0 / alpha))
     return round(kz, 3)
