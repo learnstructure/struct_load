@@ -10,7 +10,11 @@ from struct_core import (
     RectangularSection,
     StructuralModel,
 )
-from struct_load.engine.self_weight import calculate_self_weight, calculate_section_area
+from struct_load.engine.self_weight import (
+    apply_self_weight,
+    calculate_self_weight,
+    calculate_section_area,
+)
 from struct_load.engine.tributary import (
     distribute_1d_tributary,
     distribute_two_way_slab,
@@ -73,3 +77,36 @@ def test_apply_floor_load_to_frame():
     assert len(lc.element_loads) == 1  # Only the horizontal beam 2
     assert lc.element_loads[0].element_id == 2
     assert lc.element_loads[0].wy == -10.0
+
+
+def test_apply_self_weight_declarative():
+    from struct_core import LoadCase
+    model = _build_portal_frame()
+    model.load_cases = [LoadCase(id="DEAD", include_self_weight=True)]
+
+    apply_self_weight(model)
+    dead_case = model.load_cases[0]
+    assert len(dead_case.element_loads) == 3
+    assert dead_case.include_self_weight is False
+
+
+def test_apply_self_weight_3d_with_unit_weight():
+    from struct_core import Project, Metadata, Units, LoadCase
+    model = _build_portal_frame()
+    # Add Z coordinate to make it 3D
+    model.nodes[0].z = 0.0
+    model.nodes[1].z = 3.0
+    # Set explicit unit weight (e.g. concrete 24 kN/m3)
+    model.materials[0].unit_weight = 24.0
+    model.load_cases = [LoadCase(id="DEAD", include_self_weight=True)]
+
+    proj = Project(model=model, metadata=Metadata(units=Units(force="kN", length="m")))
+    apply_self_weight(proj)
+
+    dead_case = proj.model.load_cases[0]
+    assert len(dead_case.element_loads) == 3
+    # Beam 2 area = 0.15 m2 * 24 kN/m3 = 3.6 kN/m acting along -Z
+    beam_ld = next(l for l in dead_case.element_loads if l.element_id == 2)
+    assert beam_ld.wz == pytest.approx(-3.6)
+    assert beam_ld.wy == 0.0
+    assert dead_case.include_self_weight is False
