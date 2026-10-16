@@ -25,7 +25,7 @@ def calculate_flat_roof_snow_load(
     ce: float = 1.0,
     ct: float = 1.0,
     is_factor: float = 1.0,
-    unit_system: str = "si",
+    units: Union[str, Any, dict] = "kN, m",
 ) -> float:
     """
     Calculate flat roof snow load pf per ASCE 7 Section 7.3:
@@ -38,23 +38,25 @@ def calculate_flat_roof_snow_load(
     Parameters
     ----------
     pg : float
-        Ground snow load (kPa for SI, psf for US).
+        Ground snow load in active pressure units.
     ce : float
         Exposure factor Ce.
     ct : float
         Thermal factor Ct.
     is_factor : float
         Snow importance factor Is.
-    unit_system : str
-        'si' or 'us'.
+    units : str, Units, or dict
+        Active engineering units.
 
     Returns
     -------
     float
-        Design flat roof snow load (kPa or psf).
+        Design flat roof snow load.
     """
-    is_si = unit_system.lower() == "si"
-    threshold = 0.9576 if is_si else 20.0  # 20 psf in kPa = 0.9576 kPa
+    from struct_core import parse_units
+    active_units = parse_units(units)
+    is_us = active_units.length in ("in", "ft")
+    threshold = 20.0 if is_us else 0.9576  # 20 psf in kPa = 0.9576 kPa
 
     pf_basic = 0.7 * ce * ct * is_factor * pg
 
@@ -70,7 +72,7 @@ def calculate_flat_roof_snow_load(
 def calculate_roof_live_load(
     tributary_area: float = 20.0,
     slope_rise_over_12: float = 0.0,
-    unit_system: str = "si",
+    units: Union[str, Any, dict] = "kN, m",
 ) -> float:
     """
     Calculate minimum roof live load Lr per ASCE 7 Section 4.5.3:
@@ -83,21 +85,26 @@ def calculate_roof_live_load(
     Parameters
     ----------
     tributary_area : float
-        Tributary area of roof member At (m² for SI, ft² for US).
+        Tributary area of roof member At in active area units.
     slope_rise_over_12 : float
         Roof slope pitch F (inches of rise per foot). Default 0 for flat roof.
-    unit_system : str
-        'si' or 'us'.
+    units : str, Units, or dict
+        Active engineering units.
 
     Returns
     -------
     float
-        Minimum roof live load pressure Lr (kPa or psf).
+        Minimum roof live load pressure Lr.
     """
-    is_si = unit_system.lower() == "si"
+    from struct_core import parse_units, conversion_factor, Units
+    active_units = parse_units(units)
+    is_us = active_units.length in ("in", "ft") or active_units.force in ("kip", "lb", "lbf")
 
-    # Convert area to ft² for empirical formula if SI
-    at_sqft = tributary_area * 10.7639 if is_si else tributary_area
+    # In US building code practice, tributary area is in ft²; in SI it is in m²
+    if is_us:
+        at_sqft = tributary_area
+    else:
+        at_sqft = tributary_area * conversion_factor(active_units, Units(force="kN", length="ft"), "area")
 
     # R1 tributary area reduction factor
     if at_sqft <= 200.0:
@@ -116,11 +123,11 @@ def calculate_roof_live_load(
     else:
         r2 = 0.6
 
-    if is_si:
-        lr_base = 0.9576 * r1 * r2  # ~20 psf in kPa
-        lr = max(0.575, min(0.9576, lr_base))
-    else:
+    if is_us:
         lr_base = 20.0 * r1 * r2
         lr = max(12.0, min(20.0, lr_base))
+    else:
+        lr_base = 0.9576 * r1 * r2  # ~20 psf in kPa
+        lr = max(0.575, min(0.9576, lr_base))
 
     return round(lr, 3)

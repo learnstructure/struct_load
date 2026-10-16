@@ -34,20 +34,20 @@ def test_asce7_occupancy_lookups():
     assert occ_apartment.key == "residential"
 
     # Test pressure values
-    ll_si = get_occupancy_live_load("office", include_partitions=True, unit_system="si")
+    ll_si = get_occupancy_live_load("office", include_partitions=True, units="kN, m")
     assert ll_si == pytest.approx(2.40 + 0.72, rel=1e-2)
 
-    ll_us = get_occupancy_live_load("office", include_partitions=True, unit_system="us")
+    ll_us = get_occupancy_live_load("office", include_partitions=True, units="kip, in")
     assert ll_us == 65.0  # 50 + 15 psf
 
 
 def test_live_load_reduction():
     # Small area (<400 ft2): no reduction
-    l_small = calculate_live_load_reduction(L0=50.0, tributary_area=100.0, k_ll=2.0, unit_system="us")
+    l_small = calculate_live_load_reduction(L0=50.0, tributary_area=100.0, k_ll=2.0, units="kip, in")
     assert l_small == 50.0
 
     # Large area (e.g. 500 ft2, influence area = 1000 ft2)
-    l_red = calculate_live_load_reduction(L0=50.0, tributary_area=500.0, k_ll=2.0, unit_system="us")
+    l_red = calculate_live_load_reduction(L0=50.0, tributary_area=500.0, k_ll=2.0, units="kip, in")
     assert l_red < 50.0
     assert l_red >= 50.0 * 0.50  # Single story min factor 0.50
 
@@ -86,7 +86,7 @@ def test_asce7_seismic_elf():
     story_elevations = [3.5, 7.0]  # 2 stories, 3.5m each
     story_weights = [150.0, 150.0]  # 150 kN per floor
 
-    res = calculate_seismic_elf(story_elevations, story_weights, params, unit_system="si")
+    res = calculate_seismic_elf(story_elevations, story_weights, params, units="kN, m")
     assert res.base_shear > 0.0
     assert len(res.story_forces) == 2
     # Upper floor force should be greater than or equal to lower floor force
@@ -100,7 +100,7 @@ def test_asce7_wind():
     trib_widths = [5.0, 5.0]
     story_heights = [3.5, 3.5]
 
-    res = calculate_wind_forces(story_elevations, trib_widths, story_heights, params, unit_system="si")
+    res = calculate_wind_forces(story_elevations, trib_widths, story_heights, params, units="kN, m")
     assert res.total_base_shear > 0.0
     assert len(res.story_forces) == 2
     # Upper story pressure should be higher due to Kz increasing with height

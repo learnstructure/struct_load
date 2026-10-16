@@ -53,7 +53,7 @@ def demo_period_and_cs():
     print("-" * 50)
     for sys_code, sys_name in systems:
         ta = approximate_fundamental_period(
-            total_height=building_height_m, system_type=sys_code, unit_system="si"
+            total_height=building_height_m, system_type=sys_code, units="kN, m"
         )
         print(f"{sys_name:<35} | {ta:<10.3f}")
 
@@ -68,7 +68,7 @@ def demo_period_and_cs():
         system_type="rc_smf",
     )
 
-    ta_rc = approximate_fundamental_period(building_height_m, "rc_smf", "si")
+    ta_rc = approximate_fundamental_period(building_height_m, "rc_smf", "kN, m")
     cs = calculate_seismic_response_coefficient(params=params, period=ta_rc)
 
     print("\n--- Seismic Design Parameters ---")
@@ -105,7 +105,7 @@ def demo_multi_story_elf_distribution():
         story_elevations=story_elevs,
         story_weights=story_weights,
         params=params,
-        unit_system="si",
+        units="kN, m",
     )
 
     print(f"Total Effective Seismic Weight W:     {elf_result.total_weight:.1f} kN")
@@ -203,7 +203,7 @@ def demo_model_derived_seismic_weight():
     )
 
     # Use LoadGenerator to derive exact model seismic weight
-    generator = LoadGenerator(unit_system="si")
+    generator = LoadGenerator(units="kN, m")
     elevations = [3.5, 7.0]
     weights = generator.calculate_model_seismic_weight(model, elevations)
 

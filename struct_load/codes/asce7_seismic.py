@@ -34,7 +34,7 @@ class StoryForceResult:
 def approximate_fundamental_period(
     total_height: float,
     system_type: str = "rc_smf",
-    unit_system: str = "si",
+    units: Union[str, Any, dict] = "kN, m",
 ) -> float:
     """
     Calculate approximate fundamental period Ta per ASCE 7 Section 12.8.2.1:
@@ -43,19 +43,24 @@ def approximate_fundamental_period(
     Parameters
     ----------
     total_height : float
-        Building height from base to highest level (m for SI, ft for US).
+        Building height from base to highest level in active length units.
     system_type : str
         Structural system type ('rc_smf', 'steel_smf', 'rc_shear_wall', 'other').
-    unit_system : str
-        'si' (meters) or 'us' (feet).
+    units : str, Units, or dict
+        Active engineering units.
 
     Returns
     -------
     float
         Approximate fundamental period in seconds.
     """
-    is_us = unit_system.lower() == "us"
+    from struct_core import parse_units, conversion_factor, Units
+    active_units = parse_units(units)
+    is_us = active_units.length in ("in", "ft")
     sys = system_type.lower()
+
+    target_length = "ft" if is_us else "m"
+    hn = total_height * conversion_factor(active_units, Units(force="kN", length=target_length), "length")
 
     if "steel_smf" in sys or "steel_moment" in sys:
         ct = 0.028 if is_us else 0.0724
@@ -70,7 +75,7 @@ def approximate_fundamental_period(
         ct = 0.020 if is_us else 0.0488
         x = 0.75
 
-    ta = ct * (total_height ** x)
+    ta = ct * (hn ** x)
     return round(ta, 3)
 
 
@@ -108,7 +113,7 @@ def calculate_seismic_elf(
     story_elevations: List[float],
     story_weights: List[float],
     params: SeismicParameters,
-    unit_system: str = "si",
+    units: Union[str, Any, dict] = "kN, m",
     custom_period: Optional[float] = None,
 ) -> StoryForceResult:
     """
@@ -118,14 +123,14 @@ def calculate_seismic_elf(
     Parameters
     ----------
     story_elevations : List[float]
-        Elevation of each story above base (m or ft), sorted ascending.
+        Elevation of each story above base, sorted ascending.
         E.g. [3.5, 7.0] for a 2-story building.
     story_weights : List[float]
-        Effective seismic weight of each story level (kN or kips).
+        Effective seismic weight of each story level.
     params : SeismicParameters
         Seismic design parameters (SDS, SD1, R, etc.).
-    unit_system : str
-        'si' or 'us'.
+    units : str, Units, or dict
+        Active engineering units.
     custom_period : float, optional
         User-specified or modal period T. If None, computes Ta.
 
@@ -137,8 +142,10 @@ def calculate_seismic_elf(
     if len(story_elevations) != len(story_weights):
         raise ValueError("story_elevations and story_weights must have the same length.")
 
+    from struct_core import parse_units
+    active_units = parse_units(units)
     hn = story_elevations[-1]
-    ta = custom_period if custom_period is not None else approximate_fundamental_period(hn, params.system_type, unit_system)
+    ta = custom_period if custom_period is not None else approximate_fundamental_period(hn, params.system_type, units=active_units)
     cs = calculate_seismic_response_coefficient(params, ta)
 
     w_total = sum(story_weights)

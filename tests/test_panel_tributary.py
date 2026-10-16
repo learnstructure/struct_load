@@ -10,7 +10,7 @@ from struct_load.engine.tributary import (
     distribute_tributary_load,
     distribute_two_way_slab,
 )
-from conftest import build_3d_frame_model
+from helpers import build_3d_frame_model
 
 
 def test_distribute_tributary_load_directions():

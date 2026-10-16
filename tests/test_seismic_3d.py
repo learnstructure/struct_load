@@ -5,13 +5,13 @@ Tests for 3D model-derived seismic weights and multi-axis lateral loads in struc
 import pytest
 from struct_core import Metadata, Project
 from struct_load import LoadGenerator
-from conftest import build_3d_frame_model
+from helpers import build_3d_frame_model
 
 
 def test_model_derived_seismic_weight():
     model = build_3d_frame_model()
     project = Project(model=model, metadata=Metadata(title="Test Building"))
-    gen = LoadGenerator(unit_system="si")
+    gen = LoadGenerator(units="kN, m")
 
     # Apply gravity loads first so model has Dead load cases
     dead_case, _ = gen.apply_gravity_loads(
@@ -37,7 +37,7 @@ def test_model_derived_seismic_weight():
 def test_apply_lateral_seismic_3d_both_directions():
     model = build_3d_frame_model()
     project = Project(model=model, metadata=Metadata(title="Test Building"))
-    gen = LoadGenerator(unit_system="si")
+    gen = LoadGenerator(units="kN, m")
 
     # Apply gravity loads first
     gen.apply_gravity_loads(project, include_self_weight=True)
@@ -77,7 +77,7 @@ def test_apply_lateral_seismic_3d_both_directions():
 def test_generate_combinations_orthogonal_seismic():
     model = build_3d_frame_model()
     project = Project(model=model, metadata=Metadata(title="Test Building"))
-    gen = LoadGenerator(unit_system="si")
+    gen = LoadGenerator(units="kN, m")
 
     gen.apply_gravity_loads(project)
     gen.apply_lateral_seismic(project, direction="both")

@@ -30,11 +30,13 @@ class StoryWindResult:
     story_forces: Dict[int, float]     # story index -> lateral force (kN or kips)
 
 
-def calculate_kz(z: float, exposure: str = "B", unit_system: str = "si") -> float:
+def calculate_kz(z: float, exposure: str = "B", units: Union[str, Any, dict] = "kN, m") -> float:
     """
     Velocity pressure exposure coefficient Kz per ASCE 7 Table 26.10-1.
     """
-    z_m = z if unit_system.lower() == "si" else z * 0.3048
+    from struct_core import parse_units, conversion_factor, Units
+    active_units = parse_units(units)
+    z_m = z * conversion_factor(active_units, Units(force="kN", length="m"), "length")
     z_eff = max(4.57, z_m)  # Min height 15 ft (~4.57 m)
 
     exp = exposure.upper().strip()
@@ -58,7 +60,7 @@ def calculate_wind_forces(
     tributary_widths: List[float],
     story_heights: List[float],
     params: WindParameters,
-    unit_system: str = "si",
+    units: Union[str, Any, dict] = "kN, m",
 ) -> StoryWindResult:
     """
     Calculate story lateral wind forces along the height of a building frame.
@@ -73,15 +75,17 @@ def calculate_wind_forces(
         Tributary story height for each level (m or ft).
     params : WindParameters
         Wind criteria (speed, exposure, etc.).
-    unit_system : str
-        'si' or 'us'.
+    units : str, Units, or dict
+        Active engineering units.
 
     Returns
     -------
     StoryWindResult
         Contains net pressures and story lateral forces.
     """
-    is_si = unit_system.lower() == "si"
+    from struct_core import parse_units
+    active_units = parse_units(units)
+    is_si = active_units.length in ("m", "mm", "cm")
 
     # Velocity pressure qz:
     # SI: qz = 0.613 * Kz * Kzt * Kd * Ke * V^2 (N/m² -> /1000 for kPa)
@@ -97,7 +101,7 @@ def calculate_wind_forces(
     g = params.gust_factor
 
     for idx, (z, trib_w, h_story) in enumerate(zip(story_elevations, tributary_widths, story_heights)):
-        kz = calculate_kz(z, params.exposure_category, unit_system)
+        kz = calculate_kz(z, params.exposure_category, units=active_units)
         qz_raw = coeff * kz * params.kzt * params.kd * params.ke * (params.basic_wind_speed ** 2)
 
         if is_si:

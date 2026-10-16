@@ -37,7 +37,7 @@ def _build_test_frame():
 
 def test_load_generator_gravity_and_combinations():
     project = _build_test_frame()
-    gen = LoadGenerator(unit_system="si")
+    gen = LoadGenerator(units="kN, m")
 
     # 1. Apply gravity loads (Office occupancy + 5m tributary + self weight)
     dead_case, live_case = gen.apply_gravity_loads(

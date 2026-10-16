@@ -114,7 +114,7 @@ def demo_2d_plane_frame_self_weight():
     print(f"Distributed loads in Dead case: {len(dead_case.element_loads)}")
 
     # Apply self-weight directly to the model
-    apply_self_weight(model, unit_system="si", direction="-y")
+    apply_self_weight(model, units="kN, m", direction="-y")
 
     updated_case = next(lc for lc in model.load_cases if lc.id == "Dead")
     print(f"\nAfter apply_self_weight:")

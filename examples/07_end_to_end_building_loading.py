@@ -152,7 +152,7 @@ def run_pipeline():
     print(f"   Base Supports:  {len(model.supports)} fixed foundation supports")
 
     # 2. Instantiate LoadGenerator
-    generator = LoadGenerator(unit_system="si")
+    generator = LoadGenerator(units="kN, m")
 
     # 3. Apply Gravity Loads (Dead + Live)
     # Tributary width: 5.0 m (spacing between frames in Y)

@@ -42,9 +42,9 @@ def demo_kz_and_exposure_profiles():
     print(f"{'Height z (m)':<14} | {'Exp B (Urban)':<16} | {'Exp C (Open)':<16} | {'Exp D (Coastal)':<16}")
     print("-" * 68)
     for z in heights_m:
-        kz_b = calculate_kz(z, exposure="B", unit_system="si")
-        kz_c = calculate_kz(z, exposure="C", unit_system="si")
-        kz_d = calculate_kz(z, exposure="D", unit_system="si")
+        kz_b = calculate_kz(z, exposure="B", units="kN, m")
+        kz_c = calculate_kz(z, exposure="C", units="kN, m")
+        kz_d = calculate_kz(z, exposure="D", units="kN, m")
         print(f"{z:<14.1f} | {kz_b:<16.3f} | {kz_c:<16.3f} | {kz_d:<16.3f}")
 
     print("\nNote: Exposure B models urban/suburban terrain with surface roughness B.")
@@ -82,7 +82,7 @@ def demo_mwfrs_story_forces():
         tributary_widths=trib_widths,
         story_heights=story_heights,
         params=params_c,
-        unit_system="si",
+        units="kN, m",
     )
 
     print(f"Basic Wind Speed V:              {params_c.basic_wind_speed:.1f} m/s")
@@ -129,17 +129,17 @@ def demo_exposure_comparison():
     res_b = calculate_wind_forces(
         story_elevs, trib_widths, story_heights,
         WindParameters(basic_wind_speed=v_wind, exposure_category="B"),
-        unit_system="si"
+        units="kN, m"
     )
     res_c = calculate_wind_forces(
         story_elevs, trib_widths, story_heights,
         WindParameters(basic_wind_speed=v_wind, exposure_category="C"),
-        unit_system="si"
+        units="kN, m"
     )
     res_d = calculate_wind_forces(
         story_elevs, trib_widths, story_heights,
         WindParameters(basic_wind_speed=v_wind, exposure_category="D"),
-        unit_system="si"
+        units="kN, m"
     )
 
     base_b = res_b.total_base_shear
@@ -176,7 +176,7 @@ def demo_apply_wind_to_model():
         BeamElement(id=6, type="beam", start_node=5, end_node=6, material_id=mat.id, section_id=sec.id),
     ])
 
-    generator = LoadGenerator(unit_system="si")
+    generator = LoadGenerator(units="kN, m")
     wind_case, wind_res = generator.apply_lateral_wind(
         model_or_project=model,
         basic_wind_speed=40.0,  # m/s

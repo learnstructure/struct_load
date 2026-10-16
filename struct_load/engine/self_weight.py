@@ -15,6 +15,8 @@ from struct_core import (
     Project,
     RectangularSection,
     StructuralModel,
+    Units,
+    parse_units,
 )
 
 
@@ -38,9 +40,9 @@ def calculate_section_area(section: object) -> float:
 def calculate_self_weight(
     model: StructuralModel,
     load_case_id: str = "Dead_SW",
-    gravity_accel: float = 9.80665,
-    unit_system: str = "si",
-    direction: str = "-y",
+    gravity_accel: Optional[float] = None,
+    units: Optional[Union[str, Units, dict]] = None,
+    direction: Optional[str] = None,
 ) -> LoadCase:
     """
     Compute self-weight line loads for all beam/column elements in a StructuralModel.
@@ -51,19 +53,54 @@ def calculate_self_weight(
         The structural model containing materials, sections, and elements.
     load_case_id : str
         ID for the generated LoadCase.
-    gravity_accel : float
-        Acceleration due to gravity (9.81 m/s² for SI, 386.088 in/s² or 32.2 ft/s² for US).
-    unit_system : str
-        'si' (density in kg/m³, area in m² -> load in kN/m)
-        'us' (density in pcf/UnitWeight, area in in² -> load in kip/in or kip/ft).
-    direction : str
-        Direction of gravity: '-y' (2D plane frames) or '-z' (3D space frames).
+    gravity_accel : float, optional
+        Acceleration due to gravity. If None, derived from active model Units.
+    units : str, Units, or dict, optional
+        Engineering units (e.g. 'kN, m' or 'kip, in' or Units instance).
+        If None, automatically read from model.units or model.metadata.units.
+    direction : str, optional
+        Direction of gravity: '-z' (3D space frames) or '-y' (2D plane frames).
+        If None, automatically inferred from element and node geometry.
 
     Returns
     -------
     LoadCase
         A struct_core.LoadCase populated with DistributedLoad items.
     """
+    # 1. Resolve active Units
+    if units is not None:
+        active_units = parse_units(units) if isinstance(units, (str, dict)) else units
+    elif hasattr(model, "units") and model.units is not None:
+        active_units = model.units
+    elif getattr(model, "metadata", None) and getattr(model.metadata, "units", None):
+        active_units = model.metadata.units
+    else:
+        active_units = Units(force="kN", length="m")
+
+    # 2. Resolve gravity acceleration
+    g_accel = gravity_accel if gravity_accel is not None else active_units.gravity_acceleration
+
+    # 3. Resolve gravity direction
+    if direction is None:
+        has_z = (
+            any(abs(getattr(n, "z", 0.0) or 0.0) > 1e-6 for n in model.nodes)
+            or any(
+                bool(getattr(s, "uz", False)) or bool(getattr(s, "rx", False)) or bool(getattr(s, "ry", False))
+                for s in getattr(model, "supports", [])
+            )
+            or any(
+                abs(getattr(pl, "fz", 0.0) or 0.0) > 1e-6 or abs(getattr(pl, "mx", 0.0) or 0.0) > 1e-6 or abs(getattr(pl, "my", 0.0) or 0.0) > 1e-6
+                for lc in getattr(model, "load_cases", [])
+                for pl in getattr(lc, "point_loads", [])
+            )
+            or any(
+                abs(getattr(dl, "wz", 0.0) or 0.0) > 1e-6
+                for lc in getattr(model, "load_cases", [])
+                for dl in getattr(lc, "element_loads", [])
+            )
+        )
+        direction = "-z" if has_z else "-y"
+
     materials_map = {m.id: m for m in model.materials}
     sections_map = {s.id: s for s in model.sections}
 
@@ -85,28 +122,17 @@ def calculate_self_weight(
 
         # Check explicit unit_weight on material first
         unit_weight = getattr(mat, "unit_weight", None)
-        if unit_weight is not None and unit_weight > 0.0:
-            w = unit_weight * area
+        if unit_weight is not None and float(unit_weight) > 0.0:
+            w = float(unit_weight) * area
         else:
             rho = getattr(mat, "rho", None)
-            if rho is None or rho <= 0.0:
-                rho = 2400.0 if unit_system.lower() == "si" else 150.0
-
-            if unit_system.lower() == "si":
-                # mass per length = rho * area (kg/m)
-                # weight per length = (rho * area * g) / 1000 (kN/m)
-                w = (rho * area * gravity_accel) / 1000.0
+            if rho is not None and float(rho) > 0.0:
+                rho_dyn = float(rho) * active_units.consistent_mass_factor
+                w = rho_dyn * g_accel * area
             else:
-                # US Customary
-                if rho > 1.0:
-                    # rho in pcf (e.g. 150 pcf)
-                    if gravity_accel > 100.0:
-                        w = (rho / 1728.0) * area / 1000.0  # kip/in
-                    else:
-                        w = (rho * (area / 144.0)) / 1000.0  # kip/ft
-                else:
-                    # Mass density in kip*s^2/in^4
-                    w = rho * gravity_accel * area
+                from struct_core import conversion_factor
+                concrete_uw = 24.0 * conversion_factor("kN, m", active_units, "weight_density")
+                w = concrete_uw * area
 
         w_mag = float(w)
         if w_mag <= 0.0:
@@ -142,7 +168,7 @@ def apply_self_weight(
     source: Union[StructuralModel, Project],
     target_case_id: Optional[str] = None,
     gravity_accel: Optional[float] = None,
-    unit_system: Optional[str] = None,
+    units: Optional[Union[str, Units, dict]] = None,
     direction: Optional[str] = None,
 ) -> Union[StructuralModel, Project]:
     """
@@ -154,61 +180,134 @@ def apply_self_weight(
     to ensure self-weight is never double-counted.
 
     If no case has `include_self_weight=True`, applies self-weight to
-    `target_case_id` (or the default 'DEAD' load case).
+    `target_case_id` (defaulting to the 'DEAD' load case).
 
     Parameters
     ----------
     source : StructuralModel or Project
         The structural model or project to update.
     target_case_id : str, optional
-        Target load case ID if no case currently has include_self_weight=True.
+        Target load case ID if no case currently has include_self_weight=True. Default: "DEAD".
     gravity_accel : float, optional
-        Acceleration due to gravity. Defaults to 9.80665 m/s² (SI) or 386.088 in/s² (US).
-    unit_system : str, optional
-        'si' or 'us'. If source is a Project, automatically inferred from metadata.units.
+        Acceleration due to gravity. Inferred from model units if None.
+    units : str, Units, or dict, optional
+        Units specification. Automatically inferred from source.units or source.metadata.units if None.
     direction : str, optional
-        '-z' (3D space frames) or '-y' (2D plane frames). Inferred if None.
+        Direction of gravity: '-z' (3D space frames) or '-y' (2D plane frames).
+        Automatically inferred from geometry if None.
 
     Returns
     -------
     StructuralModel or Project
-        The updated source with materialized self-weight loads.
+        The updated source (supports both in-place mutation and assignment).
     """
+    # 1. Direct handling for fem3d.Structure or fem2d.Structure
+    if hasattr(source, "elements") and hasattr(source, "add_load") and not hasattr(source, "load_cases"):
+        active_units = parse_units(units or getattr(source, "units", None) or "kN, m")
+        g_accel = gravity_accel if gravity_accel is not None else active_units.gravity_acceleration
+        mass_factor = active_units.consistent_mass_factor
+
+        # Detect 2D vs 3D
+        is_3d = False
+        elem_values = list(source.elements.values())
+        for el in elem_values:
+            if type(el).__name__ in ("FrameElement", "Frame3D", "Beam3D") or hasattr(el, "w3") or hasattr(el, "wz"):
+                is_3d = True
+                break
+            for n in (getattr(el, "node_i", None), getattr(el, "node_j", None)):
+                if n is not None and abs(getattr(n, "z", 0.0) or 0.0) > 1e-6:
+                    is_3d = True
+                    break
+
+        grav_dir = (direction or ("-z" if is_3d else "-y")).lower()
+
+        # Check existing loads on source to avoid double counting
+        already_applied_eids = set()
+        for load in getattr(source, "loads", []):
+            if getattr(load, "is_self_weight", False):
+                elem = getattr(load, "element", None)
+                if elem is not None:
+                    already_applied_eids.add(getattr(elem, "id", None) or getattr(elem, "eid", None))
+
+        for eid, el in source.elements.items():
+            if eid in already_applied_eids or getattr(el, "eid", None) in already_applied_eids:
+                continue
+
+            mat = getattr(el, "material", None)
+            sec = getattr(el, "section", None)
+            if not mat or not sec:
+                continue
+
+            area = getattr(sec, "A", None)
+            if area is None or float(area) <= 0.0:
+                if hasattr(sec, "width") and hasattr(sec, "depth"):
+                    area = float(sec.width) * float(sec.depth)
+                elif hasattr(sec, "b") and hasattr(sec, "h"):
+                    area = float(sec.b) * float(sec.h)
+                else:
+                    continue
+
+            area = float(area)
+            if area <= 0.0:
+                continue
+
+            unit_weight = getattr(mat, "unit_weight", None)
+            if unit_weight is not None and float(unit_weight) > 0.0:
+                w = float(unit_weight) * area
+            else:
+                rho = getattr(mat, "rho", None)
+                if rho is not None and float(rho) > 0.0:
+                    rho_dyn = float(rho) * mass_factor
+                    w = rho_dyn * g_accel * area
+                else:
+                    from struct_core import conversion_factor
+                    concrete_uw = 24.0 * conversion_factor("kN, m", active_units, "weight_density")
+                    w = concrete_uw * area
+
+            if is_3d:
+                from fem3d.loads import DistributedLoad as Fem3dDistributedLoad
+                if grav_dir in ("-z", "z-", "-3"):
+                    sw_load = Fem3dDistributedLoad(el, wz=-w, coord_system="global", is_self_weight=True)
+                elif grav_dir in ("-y", "y-", "-2"):
+                    sw_load = Fem3dDistributedLoad(el, wy=-w, coord_system="global", is_self_weight=True)
+                elif grav_dir in ("-x", "x-", "-1"):
+                    sw_load = Fem3dDistributedLoad(el, wx=-w, coord_system="global", is_self_weight=True)
+                else:
+                    sw_load = Fem3dDistributedLoad(el, wz=-w, coord_system="global", is_self_weight=True)
+                source.add_load(sw_load)
+            else:
+                from fem2d.loads import DistributedLoad as Fem2dDistributedLoad
+                c = getattr(el, "cos", 1.0)
+                s = getattr(el, "sin", 0.0)
+                if grav_dir in ("-y", "y-"):
+                    wx_loc = -w * s
+                    wy_loc = -w * c
+                elif grav_dir in ("-x", "x-"):
+                    wx_loc = -w * c
+                    wy_loc = w * s
+                else:
+                    wx_loc = -w * s
+                    wy_loc = -w * c
+                sw_load = Fem2dDistributedLoad(element=el, wx=wx_loc, wy=wy_loc)
+                sw_load.is_self_weight = True
+                source.add_load(sw_load)
+
+        return source
+
     if isinstance(source, Project):
         if source.model is None:
             raise ValueError("Project contains no structural model.")
         model = source.model
-        if getattr(source, "metadata", None) and getattr(source.metadata, "units", None):
+        if units is None and getattr(source, "units", None) is not None:
+            units = source.units
+        elif units is None and getattr(source, "metadata", None) and getattr(source.metadata, "units", None):
             units = source.metadata.units
-            if unit_system is None:
-                if getattr(units, "is_us_customary", False):
-                    unit_system = "us"
-                elif getattr(units, "is_metric", False):
-                    unit_system = "si"
-                else:
-                    length_u = str(getattr(units, "length", "m")).lower()
-                    force_u = str(getattr(units, "force", "kn")).lower()
-                    if length_u in ("in", "ft", "inch", "feet") or force_u in ("kip", "kips", "lb", "lbf", "psi", "ksi"):
-                        unit_system = "us"
-                    else:
-                        unit_system = "si"
-            if gravity_accel is None:
-                gravity_accel = getattr(units, "gravity_acceleration", None)
     elif isinstance(source, StructuralModel):
         model = source
+        if units is None and getattr(source, "units", None) is not None:
+            units = source.units
     else:
-        raise TypeError(f"Expected Project or StructuralModel, got {type(source).__name__}")
-
-    if unit_system is None:
-        unit_system = "si"
-
-    if direction is None:
-        has_z = any(abs(getattr(n, "z", 0.0) or 0.0) > 1e-6 for n in model.nodes)
-        direction = "-z" if has_z else "-y"
-
-    g_accel = gravity_accel
-    if g_accel is None:
-        g_accel = 386.08858 if unit_system.lower() == "us" else 9.80665
+        raise TypeError(f"Expected Project, StructuralModel, or Structure, got {type(source).__name__}")
 
     # Identify load cases requesting self-weight
     cases_with_sw = [lc for lc in model.load_cases if getattr(lc, "include_self_weight", False)]
@@ -218,8 +317,8 @@ def apply_self_weight(
             sw_case = calculate_self_weight(
                 model=model,
                 load_case_id=lc.id,
-                gravity_accel=g_accel,
-                unit_system=unit_system,
+                gravity_accel=gravity_accel,
+                units=units,
                 direction=direction,
             )
             lc.element_loads.extend(sw_case.element_loads)
@@ -233,8 +332,8 @@ def apply_self_weight(
         sw_case = calculate_self_weight(
             model=model,
             load_case_id=target_id,
-            gravity_accel=g_accel,
-            unit_system=unit_system,
+            gravity_accel=gravity_accel,
+            units=units,
             direction=direction,
         )
 
@@ -246,3 +345,4 @@ def apply_self_weight(
             model.load_cases.append(sw_case)
 
     return source
+

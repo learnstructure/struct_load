@@ -15,8 +15,9 @@ A building code load determination and management package for the [Structural En
   - In 2D: Story elevations along $Y$, gravity along $-Y$ ($w_y$), lateral loads along $X$ ($f_x$).
   - In 3D: Story elevations along $Z$, gravity along $-Z$ ($w_z$), lateral loads along $X$ ($f_x$) and $Y$ ($f_y$).
   - Automatic floor elevation detection from beam levels above foundation.
-- **Unit System Auto-Inference**:
-  - Automatically detects US Customary (`ft`, `in`, `kip`, `psf`) vs SI (`m`, `kN`, `kPa`) directly from `project.metadata.units`.
+- **Canonical Unit System Auto-Inference**:
+  - Automatically reads `Units` directly from `source.units` (`fem3d.Structure`, `fem2d.Structure`, `StructuralModel`) or `project.metadata.units`.
+  - Automatically derives exact acceleration due to gravity $g$ from active length units ($9.80665\text{ m/s}^2$, $386.0886\text{ in/s}^2$, $32.174\text{ ft/s}^2$), eliminating manual $g$ specification.
 - **Panel & `AreaLoad` Tributary Distribution**:
   - Maps floor surface pressures directly from `struct_core.AreaLoad` onto perimeter supporting beams.
   - **One-way slabs**: tributary strips ($w = q \cdot S/2$) applied to beams perpendicular to span axis; parallel beams receive 0 load.
@@ -25,12 +26,19 @@ A building code load determination and management package for the [Structural En
   - Full database of standard occupancies (Offices, Residential, Classrooms, Corridors, Retail, Storage, Assembly, Parking, Roof).
   - Built-in partition load allowances (15 psf / 0.72 kPa for offices).
   - ASCE 7 Section 4.7 live load reduction calculator ($L = L_0 (0.25 + 15/\sqrt{K_{LL} A_T})$).
-- **Self-Weight Engine**:
-  - Scans `struct_core.StructuralModel.elements` and calculates gravity line loads ($w = -\rho A g$) directly from cross-section dimensions and material density.
+- **Universal Self-Weight Engine**:
+  - Computes continuous gravity line loads directly from section geometry and material weight density (`unit_weight` or $\rho \cdot g$).
+  - Works polymorphically on `fem3d.Structure`, `fem2d.Structure`, `struct_core.StructuralModel`, and `Project`.
+  - Automatically detects 3D ($-z$) vs 2D ($-y$) direction and applies `DistributedLoad(..., is_self_weight=True)`.
 - **Exact Model-Derived Seismic Weights & 3D ELF**:
   - Calculates exact story seismic weights $W_i$ directly from model Dead loads and member self-weights.
   - Directional seismic loads (`EQ_X`, `EQ_Y`, or `direction="both"`).
   - Calculates approximate fundamental period $T_a$, seismic response coefficient $C_s$, base shear $V = C_s W$, and vertical force distribution $F_x, F_y$ along building height.
+- **Mass Source & Seismic Weight Calculation Engine**:
+  - Commercial-grade mass source evaluation converting load cases into inertial mass ($m = \sum c_i W_i / g$).
+  - Supports structural element self-masses ($\rho \cdot A \cdot L$), assigned nodal lumped masses, element masses, and load case forces (point loads, distributed loads, area loads).
+  - Calculates total seismic weight $W$, total inertial mass $M$, global Center of Mass $(X_{cm}, Y_{cm}, Z_{cm})$, and story-by-story mass distribution.
+  - Directly consumed by `fem2d` and `fem3d` adapters for modal and response spectrum dynamic analysis.
 - **ASCE 7 Snow & Roof Live Loads**:
   - ASCE 7 Chapter 7 flat roof snow load ($p_f = 0.7 C_e C_t I_s p_g$, bounded by code minimum $p_m$).
   - ASCE 7 Section 4.5 minimum roof live load ($L_r = 20 R_1 R_2$).
@@ -116,13 +124,19 @@ print(f"Distributed into {n_created} beam line loads.")
 
 ### 3. Materializing Element Self-Weight (`apply_self_weight`)
 
+`apply_self_weight` can be called directly on analysis solver structures (`fem3d.Structure`, `fem2d.Structure`) or schema containers (`StructuralModel`, `Project`):
+
 ```python
 from struct_load import apply_self_weight
 
-# Automatically infers units and 2D/3D direction (-z for 3D, -y for 2D)
+# Option A: Direct solver application (no schema conversion required)
+struct.apply_self_weight()      # via method on fem3d/fem2d Structure
+# or: apply_self_weight(struct)
+
+# Option B: Schema model application (infers units and direction automatically)
 apply_self_weight(project)
-# Element loads are computed from material density and section area,
-# appended to case.element_loads, and case.include_self_weight is set to False.
+# Element loads are computed from material unit_weight and section area,
+# appended to DEAD case.element_loads, with case.include_self_weight set to False.
 ```
 
 ---
@@ -149,6 +163,7 @@ The [`examples/`](examples/) directory contains standalone, runnable scripts dem
 | [`05_wind_mwfrs_procedure.py`](examples/05_wind_mwfrs_procedure.py) | ASCE 7 Chapter 27 MWFRS directional wind procedure, velocity pressure $q_z$, exposure coefficient $K_z$ profiles (B, C, D), and story wind forces. |
 | [`06_factored_load_combinations.py`](examples/06_factored_load_combinations.py) | ASCE 7 / ACI 318 LRFD and ASD combinations generator, and 3D orthogonal seismic combinations ($1.0E_X \pm 0.3E_Y$ and $0.3E_X \pm 1.0E_Y$). |
 | [`07_end_to_end_building_loading.py`](examples/07_end_to_end_building_loading.py) | Complete automated loading pipeline on a 3-story concrete building project using `LoadGenerator`. |
+| [`08_mass_source_and_seismic_weight.py`](examples/08_mass_source_and_seismic_weight.py) | Commercial-grade Mass Source evaluation converting $1.0D + 0.25L$ into dynamic mass, Center of Mass $(X_{cm}, Y_{cm}, Z_{cm})$, and story mass distribution. |
 | [`run_all.py`](examples/run_all.py) | Master runner executing all examples sequentially. |
 
 To run all examples:

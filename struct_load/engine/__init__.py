@@ -10,6 +10,10 @@ from .geometry import (
     get_beam_span_and_orientation,
     is_horizontal_beam,
 )
+from .mass_source import (
+    MassSourceResult,
+    calculate_mass_source,
+)
 from .self_weight import (
     apply_self_weight,
     calculate_section_area,
@@ -38,4 +42,6 @@ __all__ = [
     "distribute_two_way_slab",
     "distribute_area_loads_to_beams",
     "apply_floor_load_to_frame",
+    "calculate_mass_source",
+    "MassSourceResult",
 ]

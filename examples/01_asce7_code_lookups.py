@@ -52,10 +52,10 @@ def run_occupancy_lookups() -> None:
         print(f"{occ.key:<22} | {occ.uniform_psf:>8.1f} psf  | {occ.uniform_kpa:>8.2f} kPa  | {part_str:<10}")
 
     # Office with partition comparison
-    off_base_us = get_occupancy_live_load("office", include_partitions=False, unit_system="us")
-    off_full_us = get_occupancy_live_load("office", include_partitions=True, unit_system="us")
-    off_base_si = get_occupancy_live_load("office", include_partitions=False, unit_system="si")
-    off_full_si = get_occupancy_live_load("office", include_partitions=True, unit_system="si")
+    off_base_us = get_occupancy_live_load("office", include_partitions=False, units="kip, in")
+    off_full_us = get_occupancy_live_load("office", include_partitions=True, units="kip, in")
+    off_base_si = get_occupancy_live_load("office", include_partitions=False, units="kN, m")
+    off_full_si = get_occupancy_live_load("office", include_partitions=True, units="kN, m")
 
     print("\nOffice Partition Allowance Comparison (ASCE 7 Sec 4.3.2):")
     print(f"  US: Base = {off_base_us:.1f} psf -> With Partitions (+15 psf) = {off_full_us:.1f} psf")
@@ -89,7 +89,7 @@ def run_live_load_reduction() -> None:
                 tributary_area=at,
                 k_ll=k_ll,
                 is_multi_story=is_multi,
-                unit_system="us",
+                units="kip, in",
             )
             pct = ((l0_psf - l_red) / l0_psf) * 100.0
             print(f"  {at:>8.0f} sq ft   | {ai:>10.0f} sq ft     | {l_red:>7.1f} psf  | {pct:>7.1f}%")
@@ -107,7 +107,7 @@ def run_roof_snow_and_live() -> None:
     print(f"  {'Ground Snow pg':<16} | {'Flat Roof pf':<14} | {'Code Min pm':<14}")
     print("  " + "-" * 48)
     for pg in pg_values_us:
-        pf = calculate_flat_roof_snow_load(pg=pg, ce=1.0, ct=1.0, is_factor=1.0, unit_system="us")
+        pf = calculate_flat_roof_snow_load(pg=pg, ce=1.0, ct=1.0, is_factor=1.0, units="kip, in")
         pm = pg if pg <= 20.0 else 20.0
         print(f"  {pg:>8.1f} psf     | {pf:>8.1f} psf    | {pm:>8.1f} psf")
 
@@ -116,8 +116,8 @@ def run_roof_snow_and_live() -> None:
     print("\nMinimum Roof Live Load (Lr) across tributary areas:")
     areas = [100.0, 250.0, 500.0, 800.0]  # ft^2
     for a in areas:
-        lr_flat = calculate_roof_live_load(tributary_area=a, slope_rise_over_12=0.0, unit_system="us")
-        lr_sloped = calculate_roof_live_load(tributary_area=a, slope_rise_over_12=6.0, unit_system="us")
+        lr_flat = calculate_roof_live_load(tributary_area=a, slope_rise_over_12=0.0, units="kip, in")
+        lr_sloped = calculate_roof_live_load(tributary_area=a, slope_rise_over_12=6.0, units="kip, in")
         print(f"  Area = {a:>5.0f} ft^2 -> Flat Roof (slope=0) = {lr_flat:.1f} psf | Sloped (6:12) = {lr_sloped:.1f} psf")
     print("=" * 72)
 

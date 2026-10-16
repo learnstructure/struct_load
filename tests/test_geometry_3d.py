@@ -12,7 +12,7 @@ from struct_load.engine.geometry import (
     get_beam_span_and_orientation,
     is_horizontal_beam,
 )
-from conftest import build_3d_frame_model
+from helpers import build_3d_frame_model
 
 
 def test_detect_dimensionality():

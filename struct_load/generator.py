@@ -16,6 +16,8 @@ from struct_core import (
     PointLoad,
     Project,
     StructuralModel,
+    Units,
+    parse_units,
 )
 
 from .codes.asce7_combinations import generate_asce7_combinations
@@ -56,39 +58,41 @@ class LoadGenerator:
     struct_core.LoadCase and struct_core.LoadCombination instances.
     """
 
-    def __init__(self, unit_system: Optional[str] = None):
+    def __init__(self, units: Optional[Union[str, Units, dict]] = None):
         """
         Initialize LoadGenerator.
 
         Parameters
         ----------
-        unit_system : str, optional
-            'si' or 'us'. If None, automatically inferred from Project metadata.units
-            when a Project is passed, or defaults to 'si'.
+        units : str, Units, or dict, optional
+            Units specification (e.g. 'kN, m' or 'kip, in'). If None, automatically inferred
+            from model or project units, or defaults to 'kN, m'.
         """
-        self._unit_system = unit_system.lower() if unit_system else None
+        self._units = parse_units(units) if units is not None else None
 
     @property
-    def unit_system(self) -> str:
-        """Active or default unit system."""
-        return self._unit_system or "si"
+    def units(self) -> Optional[Units]:
+        """Active or default Units."""
+        return self._units
 
-    def get_unit_system(self, model_or_project: Union[StructuralModel, Project]) -> str:
-        """Resolve the effective unit system ('si' or 'us') for a model or project."""
-        if self._unit_system:
-            return self._unit_system
+    def get_units(self, model_or_project: Union[StructuralModel, Project]) -> Units:
+        """Resolve effective Units for a model or project."""
+        if self._units:
+            return self._units
 
         if isinstance(model_or_project, Project):
+            if getattr(model_or_project, "units", None) is not None:
+                return parse_units(model_or_project.units)
             meta = getattr(model_or_project, "metadata", None)
-            units = getattr(meta, "units", None) if meta else None
-            if units:
-                length_u = str(getattr(units, "length", "m")).lower()
-                force_u = str(getattr(units, "force", "kn")).lower()
-                if length_u in ("in", "ft", "inch", "feet") or force_u in ("kip", "kips", "lb", "lbf", "psi", "ksi"):
-                    return "us"
-                return "si"
+            u = getattr(meta, "units", None) if meta else None
+            if u:
+                return parse_units(u)
+            if model_or_project.model and getattr(model_or_project.model, "units", None) is not None:
+                return parse_units(model_or_project.model.units)
+        elif hasattr(model_or_project, "units") and model_or_project.units is not None:
+            return parse_units(model_or_project.units)
 
-        return "si"
+        return Units(force="kN", length="m")
 
     @staticmethod
     def _unwrap_model(model_or_project: Union[StructuralModel, Project]) -> StructuralModel:
@@ -114,7 +118,7 @@ class LoadGenerator:
         Automatically senses 2D (wy along -Y) vs 3D (wz along -Z) geometry.
         """
         model = self._unwrap_model(model_or_project)
-        unit_sys = self.get_unit_system(model_or_project)
+        active_units = self.get_units(model_or_project)
         is_3d = detect_model_dimensionality(model) == "3d"
         direction = "-z" if is_3d else "-y"
 
@@ -123,7 +127,7 @@ class LoadGenerator:
             ll_pressure = custom_live_load
         else:
             ll_pressure = get_occupancy_live_load(
-                occupancy, include_partitions=True, unit_system=unit_sys
+                occupancy, include_partitions=True, units=active_units
             )
 
         live_case = apply_floor_load_to_frame(
@@ -153,7 +157,7 @@ class LoadGenerator:
             sw_case = calculate_self_weight(
                 model=model,
                 load_case_id="SW",
-                unit_system=unit_sys,
+                units=active_units,
                 direction=direction,
             )
             for sw_load in sw_case.element_loads:
@@ -201,7 +205,7 @@ class LoadGenerator:
         Calculate and assign ASCE 7 Snow and/or Roof Live load cases to roof level beams.
         """
         model = self._unwrap_model(model_or_project)
-        unit_sys = self.get_unit_system(model_or_project)
+        active_units = self.get_units(model_or_project)
         is_3d = detect_model_dimensionality(model) == "3d"
         direction = "-z" if is_3d else "-y"
 
@@ -221,7 +225,7 @@ class LoadGenerator:
                 ce=exposure_factor_ce,
                 ct=thermal_factor_ct,
                 is_factor=importance_factor,
-                unit_system=unit_sys,
+                units=active_units,
             )
             snow_case = apply_floor_load_to_frame(
                 model=model,
@@ -244,7 +248,7 @@ class LoadGenerator:
             lr_pressure = calculate_roof_live_load(
                 tributary_area=tributary_width * 6.0,
                 slope_rise_over_12=0.0,
-                unit_system=unit_sys,
+                units=active_units,
             )
 
         roof_live_case = apply_floor_load_to_frame(
@@ -294,7 +298,6 @@ class LoadGenerator:
         Compute deterministic story seismic weights W_i directly from dead loads
         and member self-weights defined in the model.
         """
-        unit_sys = self.get_unit_system(model)
         is_3d = detect_model_dimensionality(model, tolerance=tolerance) == "3d"
         nodes_map = {n.id: n for n in model.nodes}
 
@@ -364,7 +367,8 @@ class LoadGenerator:
         # If not, add section self-weight for remaining elements
         materials_map = {m.id: m for m in model.materials}
         sections_map = {s.id: s for s in model.sections}
-        g_accel = 386.08858 if unit_sys == "us" else 9.80665
+        active_units = self.get_units(model)
+        g_accel = active_units.gravity_acceleration
 
         for elem in model.elements:
             if elem.id in loaded_elements:
@@ -379,23 +383,17 @@ class LoadGenerator:
                 continue
 
             unit_weight = getattr(mat, "unit_weight", None)
-            if unit_weight is not None and unit_weight > 0.0:
-                w_unit = unit_weight * area
+            if unit_weight is not None and float(unit_weight) > 0.0:
+                w_unit = float(unit_weight) * area
             else:
                 rho = getattr(mat, "rho", None)
-                if rho is None or rho <= 0.0:
-                    rho = 2400.0 if unit_sys == "si" else 150.0
-
-                if unit_sys == "si":
-                    w_unit = (rho * area * g_accel) / 1000.0  # kN/m
+                if rho is not None and float(rho) > 0.0:
+                    rho_dyn = float(rho) * active_units.consistent_mass_factor
+                    w_unit = rho_dyn * g_accel * area
                 else:
-                    if rho > 1.0:
-                        if g_accel > 100.0:
-                            w_unit = (rho / 1728.0) * area / 1000.0  # kip/in
-                        else:
-                            w_unit = (rho * (area / 144.0)) / 1000.0  # kip/ft
-                    else:
-                        w_unit = rho * g_accel * area
+                    from struct_core import conversion_factor
+                    concrete_uw = 24.0 * conversion_factor("kN, m", active_units, "weight_density")
+                    w_unit = concrete_uw * area
 
             length = get_beam_length(elem, nodes_map)
             total_w = float(w_unit) * length
@@ -435,7 +433,7 @@ class LoadGenerator:
         Supports 2D and 3D directional seismic ('X', 'Y', or 'both').
         """
         model = self._unwrap_model(model_or_project)
-        unit_sys = self.get_unit_system(model_or_project)
+        active_units = self.get_units(model_or_project)
         is_3d = detect_model_dimensionality(model) == "3d"
 
         elevations = story_elevations or self.detect_story_elevations(model)
@@ -465,7 +463,7 @@ class LoadGenerator:
             story_elevations=elevations,
             story_weights=exact_weights,
             params=params,
-            unit_system=unit_sys,
+            units=active_units,
         )
 
         dir_choice = direction.upper().strip()
@@ -539,7 +537,7 @@ class LoadGenerator:
         Supports directional wind ('X', 'Y', or 'both').
         """
         model = self._unwrap_model(model_or_project)
-        unit_sys = self.get_unit_system(model_or_project)
+        active_units = self.get_units(model_or_project)
         is_3d = detect_model_dimensionality(model) == "3d"
 
         elevations = story_elevations or self.detect_story_elevations(model)
@@ -564,7 +562,7 @@ class LoadGenerator:
             tributary_widths=[tributary_width] * len(elevations),
             story_heights=story_heights,
             params=wind_params,
-            unit_system=unit_sys,
+            units=active_units,
         )
 
         dir_choice = direction.upper().strip()

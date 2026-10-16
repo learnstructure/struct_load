@@ -48,7 +48,7 @@ def test_section_area():
 
 def test_self_weight():
     model = _build_portal_frame()
-    sw_case = calculate_self_weight(model, load_case_id="SW", unit_system="si")
+    sw_case = calculate_self_weight(model, load_case_id="SW", units="kN, m")
     assert sw_case.id == "SW"
     assert len(sw_case.element_loads) == 3
 

@@ -9,7 +9,7 @@ from struct_load import (
     calculate_flat_roof_snow_load,
     calculate_roof_live_load,
 )
-from conftest import build_3d_frame_model
+from helpers import build_3d_frame_model
 
 
 def test_flat_roof_snow_load_basic_and_minimum():
@@ -17,37 +17,37 @@ def test_flat_roof_snow_load_basic_and_minimum():
     # pf_basic = 0.7 * 1.5 = 1.05 kPa
     # pm = 0.958 kPa
     # pf = max(1.05, 0.958) = 1.05 kPa
-    pf = calculate_flat_roof_snow_load(pg=1.5, unit_system="si")
+    pf = calculate_flat_roof_snow_load(pg=1.5, units="kN, m")
     assert pf == 1.05
 
     # Low snow zone: pg = 0.5 kPa (<= 0.96 kPa)
     # pf_basic = 0.7 * 0.5 = 0.35 kPa
     # pm = 1.0 * 0.5 = 0.5 kPa (governs!)
-    pf_low = calculate_flat_roof_snow_load(pg=0.5, unit_system="si")
+    pf_low = calculate_flat_roof_snow_load(pg=0.5, units="kN, m")
     assert pf_low == 0.5
 
     # US Customary: pg = 30 psf (> 20 psf)
     # pf_basic = 0.7 * 30 = 21 psf. pm = 20 psf. pf = 21 psf
-    pf_us = calculate_flat_roof_snow_load(pg=30.0, unit_system="us")
+    pf_us = calculate_flat_roof_snow_load(pg=30.0, units="kip, in")
     assert pf_us == 21.0
 
 
 def test_roof_live_load_bounds():
     # Large area (flat roof): At = 800 sqft (> 600 sqft), pitch = 0
     # R1 = 0.6, R2 = 1.0 -> 20 * 0.6 = 12 psf (code minimum bound)
-    lr_us = calculate_roof_live_load(tributary_area=800.0, slope_rise_over_12=0.0, unit_system="us")
+    lr_us = calculate_roof_live_load(tributary_area=800.0, slope_rise_over_12=0.0, units="kip, in")
     assert lr_us == 12.0
 
     # Small area: At = 100 sqft (<= 200 sqft)
     # R1 = 1.0, R2 = 1.0 -> 20 psf (code maximum bound)
-    lr_small = calculate_roof_live_load(tributary_area=100.0, slope_rise_over_12=0.0, unit_system="us")
+    lr_small = calculate_roof_live_load(tributary_area=100.0, slope_rise_over_12=0.0, units="kip, in")
     assert lr_small == 20.0
 
 
 def test_apply_roof_loads_to_3d_frame():
     model = build_3d_frame_model()
     project = Project(model=model, metadata=Metadata(title="Test Building"))
-    gen = LoadGenerator(unit_system="si")
+    gen = LoadGenerator(units="kN, m")
 
     created = gen.apply_roof_loads(
         project,

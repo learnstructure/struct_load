@@ -5,19 +5,21 @@ Tests for unit system auto-inference in struct_load.
 import pytest
 from struct_core import Metadata, Project, Units
 from struct_load import LoadGenerator
-from conftest import build_3d_frame_model
+from helpers import build_3d_frame_model
 
 
-def test_unit_system_auto_inference_us():
+def test_units_auto_inference_us():
     model = build_3d_frame_model()
     # US Customary project
     units_us = Units(length="ft", force="kip", time="s", temperature="F")
     meta = Metadata(title="US Building", units=units_us)
     project = Project(model=model, metadata=meta)
 
-    # Do not specify unit_system in LoadGenerator constructor
+    # Do not specify units in LoadGenerator constructor
     gen = LoadGenerator()
-    assert gen.get_unit_system(project) == "us"
+    u = gen.get_units(project)
+    assert u.length == "ft"
+    assert u.force == "kip"
 
     dead_case, live_case = gen.apply_gravity_loads(
         project,
@@ -35,14 +37,16 @@ def test_unit_system_auto_inference_us():
     assert abs(first_live.wz) == pytest.approx(975.0, rel=0.01)
 
 
-def test_unit_system_auto_inference_si():
+def test_units_auto_inference_si():
     model = build_3d_frame_model()
     units_si = Units(length="m", force="kN", time="s", temperature="C")
     meta = Metadata(title="SI Building", units=units_si)
     project = Project(model=model, metadata=meta)
 
     gen = LoadGenerator()
-    assert gen.get_unit_system(project) == "si"
+    u = gen.get_units(project)
+    assert u.length == "m"
+    assert u.force == "kN"
 
     dead_case, live_case = gen.apply_gravity_loads(
         project,

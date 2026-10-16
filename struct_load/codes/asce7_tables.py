@@ -212,7 +212,7 @@ def lookup_occupancy(query: str) -> OccupancyLiveLoad:
 def get_occupancy_live_load(
     occupancy: str,
     include_partitions: bool = True,
-    unit_system: str = "si",
+    units: Union[str, Any, dict] = "kN, m",
 ) -> float:
     """
     Retrieve the standard design live load intensity for an occupancy.
@@ -223,24 +223,27 @@ def get_occupancy_live_load(
         Occupancy type or name (e.g. 'office', 'residential', 'classroom').
     include_partitions : bool
         Whether to add standard partition allowance (15 psf / 0.72 kPa for offices).
-    unit_system : str
-        'si' for kPa (kN/m²), 'us' for psf.
+    units : str, Units, or dict
+        Active engineering units (e.g. 'kN, m' or 'kip, in').
 
     Returns
     -------
     float
         Design uniform live load pressure.
     """
+    from struct_core import parse_units
+    active_units = parse_units(units)
     occ = lookup_occupancy(occupancy)
-    if unit_system.lower() == "us":
+    if active_units.length in ("in", "ft") or active_units.force in ("kip", "lb", "lbf"):
         load = occ.uniform_psf
         if include_partitions and occ.partition_psf > 0:
             load += occ.partition_psf
+        return round(load, 4)
     else:
         load = occ.uniform_kpa
         if include_partitions and occ.partition_kpa > 0:
             load += occ.partition_kpa
-    return round(load, 3)
+        return round(load, 4)
 
 
 def calculate_live_load_reduction(
@@ -248,7 +251,7 @@ def calculate_live_load_reduction(
     tributary_area: float,
     k_ll: float = 2.0,
     is_multi_story: bool = False,
-    unit_system: str = "si",
+    units: Union[str, Any, dict] = "kN, m",
 ) -> float:
     """
     Calculate reduced design live load per ASCE 7-16/22 Eq. 4.7-1.
@@ -256,24 +259,28 @@ def calculate_live_load_reduction(
     Parameters
     ----------
     L0 : float
-        Unreduced live load (kPa or psf).
+        Unreduced live load (same unit as returned load).
     tributary_area : float
-        Tributary area A_T (m² for SI, ft² for US).
+        Tributary area A_T in active area units.
     k_ll : float
         Live load element factor (4.0 for columns/walls, 2.0 for beams/girders, 1.0 for slabs).
     is_multi_story : bool
         Whether member supports multiple floors (controls minimum reduction factor 0.40 vs 0.50).
-    unit_system : str
-        'si' or 'us'.
+    units : str, Units, or dict
+        Active engineering units.
 
     Returns
     -------
     float
         Reduced design live load L (same unit as L0).
     """
-    # Convert area to ft² for the empirical ASCE 7 formula:
-    # L = L0 * (0.25 + 15 / sqrt(K_LL * A_T))
-    area_ft2 = tributary_area if unit_system.lower() == "us" else tributary_area * 10.7639
+    from struct_core import parse_units, conversion_factor, Units
+    active_units = parse_units(units)
+    # Area must be in ft² for ASCE 7 Eq. 4.7-1
+    if active_units.length in ("in", "ft") or active_units.force in ("kip", "lb", "lbf"):
+        area_ft2 = tributary_area
+    else:
+        area_ft2 = tributary_area * conversion_factor(active_units, Units(force="kN", length="ft"), "area")
 
     ai = k_ll * area_ft2
     if ai < 400.0:
