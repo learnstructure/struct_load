@@ -33,6 +33,7 @@ from struct_core import (
     Support,
     Units,
 )
+from struct_load.codes.asce7_seismic import SeismicParameters
 from struct_load.generator import LoadGenerator
 
 
@@ -44,7 +45,7 @@ def build_3story_building_model() -> Project:
     - 6 columns per story (18 columns total)
     - 7 beams per level (4 in X, 3 in Y -> 21 beams total)
     """
-    model = StructuralModel()
+    model = StructuralModel(units="kN, m")
 
     # Grid definitions
     x_coords = [0.0, 6.0, 12.0]
@@ -125,13 +126,13 @@ def build_3story_building_model() -> Project:
 
     # Wrap in Project
     project = Project(
+        model=model,
+        units="kN, m",
         metadata=Metadata(
             title="3-Story RC Office Building Frame",
             project_name="ASCE 7 / ACI 318 Loading Pipeline",
             author="Structural Engineering AI Agent",
-            units=Units(length="m", force="kN"),
         ),
-        model=model,
     )
 
     return project
@@ -185,11 +186,10 @@ def run_pipeline():
     # SDS = 0.90 g, SD1 = 0.45 g, R = 8.0 (Special RC Moment Frame)
     # Derives exact building seismic weight directly from member self-weights and dead load cases!
     print("\n4. Applying Lateral Seismic Loads (ASCE 7 Section 12.8 ELF):")
+    params = SeismicParameters(sds=0.90, sd1=0.45, r_factor=8.0)
     seismic_cases, elf_res = generator.apply_lateral_seismic(
         model_or_project=project,
-        sds=0.90,
-        sd1=0.45,
-        r_factor=8.0,
+        params=params,
         direction="both",
     )
     print(f"   - Effective Seismic Weight W:  {elf_res.total_weight:.2f} kN")

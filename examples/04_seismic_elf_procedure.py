@@ -144,7 +144,7 @@ def demo_model_derived_seismic_weight():
     print("=" * 70)
 
     # Build a 2-story 3D structural model
-    model = StructuralModel()
+    model = StructuralModel(units="kN, m")
 
     # Ground (Z=0), Floor 1 (Z=3.5), Roof (Z=7.0)
     for z, z_val in enumerate([0.0, 3.5, 7.0]):
@@ -213,11 +213,10 @@ def demo_model_derived_seismic_weight():
     print(f"  Total Seismic Weight W = {sum(weights):.2f} kN")
 
     # Apply lateral seismic using the generator
+    params = SeismicParameters(sds=1.0, sd1=0.5, r_factor=8.0)
     seismic_cases, elf_res = generator.apply_lateral_seismic(
         model_or_project=model,
-        sds=1.0,
-        sd1=0.5,
-        r_factor=8.0,
+        params=params,
         direction="X",
     )
     print(f"\nGenerated Seismic Load Case: {seismic_cases.id} ({seismic_cases.name})")

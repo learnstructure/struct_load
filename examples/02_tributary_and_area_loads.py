@@ -103,7 +103,7 @@ def demo_area_load_distribution_on_model():
     # Build a single-story 3D floor bay:
     # 4 corner columns and 4 perimeter floor beams at elevation Z = 3.5 m
     # Bay dimensions: X in [0, 6], Y in [0, 4], Z in [0, 3.5]
-    model = StructuralModel()
+    model = StructuralModel(units="kN, m")
 
     # Base nodes (Z = 0)
     model.nodes.extend([

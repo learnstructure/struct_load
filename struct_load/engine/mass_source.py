@@ -55,11 +55,17 @@ class MassSourceResult:
     center_of_mass: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     story_masses: Dict[float, float] = field(default_factory=dict)
     mass_source: Optional[MassSource] = None
+    gravity_accel: float = 9.80665
 
     @property
     def total_weight(self) -> float:
         """Alias for total_seismic_weight."""
         return self.total_seismic_weight
+
+    @property
+    def story_weights(self) -> Dict[float, float]:
+        """Effective seismic weights mapped to each story elevation."""
+        return {elev: m * self.gravity_accel for elev, m in self.story_masses.items()}
 
 
 def calculate_mass_source(
@@ -351,6 +357,54 @@ def calculate_mass_source(
             m_eff = m_vec[0] if ms.lateral_only else max(m_vec)
             story_masses[closest_elev] += m_eff
 
+        for e in model.elements:
+            if e.start_node not in nodes_map or e.end_node not in nodes_map:
+                continue
+            n_i = nodes_map[e.start_node]
+            n_j = nodes_map[e.end_node]
+            z_i = getattr(n_i, "z", n_i.y if is_2d else 0.0)
+            z_j = getattr(n_j, "z", n_j.y if is_2d else 0.0)
+            L = math.sqrt(
+                (n_j.x - n_i.x) ** 2
+                + (n_j.y - n_i.y) ** 2
+                + (getattr(n_j, "z", 0.0) - getattr(n_i, "z", 0.0)) ** 2
+            )
+            if L <= 1e-12:
+                continue
+
+            e_extra_m = element_masses.get(e.id, 0.0)
+            e_self_m = 0.0
+            if ms.include_element_mass:
+                mat = materials_map.get(getattr(e, "material_id", None))
+                sec = sections_map.get(getattr(e, "section_id", None))
+                if mat and sec:
+                    area = calculate_section_area(sec)
+                    unit_weight = getattr(mat, "unit_weight", None)
+                    if unit_weight is not None and float(unit_weight) > 0.0:
+                        e_self_m = (float(unit_weight) * area) / gravity_accel
+                    else:
+                        rho = getattr(mat, "rho", None)
+                        if rho is not None and float(rho) > 0.0:
+                            rho_dyn = float(rho) * active_units.consistent_mass_factor
+                            e_self_m = rho_dyn * area
+                        else:
+                            from struct_core import conversion_factor
+                            concrete_uw = 24.0 * conversion_factor("kN, m", active_units, "weight_density")
+                            e_self_m = (concrete_uw * area) / gravity_accel
+
+            total_elem_m = (e_self_m + e_extra_m) * L
+            if abs(z_i - z_j) < 1e-4:
+                # Horizontal member at elevation
+                elev = 0.5 * (z_i + z_j)
+                closest_elev = min(story_elevations, key=lambda el: abs(el - elev))
+                story_masses[closest_elev] += total_elem_m
+            else:
+                # Vertical or inclined member: split tributary mass between endpoints
+                closest_elev_i = min(story_elevations, key=lambda el: abs(el - z_i))
+                closest_elev_j = min(story_elevations, key=lambda el: abs(el - z_j))
+                story_masses[closest_elev_i] += 0.5 * total_elem_m
+                story_masses[closest_elev_j] += 0.5 * total_elem_m
+
     # Clean dict output for nodal masses (tuple format)
     nodal_tuples = {nid: (vec[0], vec[1], vec[2]) for nid, vec in nodal_masses.items()}
 
@@ -362,4 +416,5 @@ def calculate_mass_source(
         center_of_mass=(cm_x, cm_y, cm_z),
         story_masses=story_masses,
         mass_source=ms,
+        gravity_accel=gravity_accel,
     )

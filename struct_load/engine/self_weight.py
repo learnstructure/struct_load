@@ -140,19 +140,19 @@ def calculate_self_weight(
 
         dir_lower = direction.lower()
         if dir_lower in ("-z", "z-", "down_z", "gravity"):
-            load = DistributedLoad(element_id=elem.id, wx=0.0, wy=0.0, wz=-w_mag)
+            load = DistributedLoad(element_id=elem.id, wx=0.0, wy=0.0, wz=-w_mag, is_self_weight=True)
         elif dir_lower in ("+z", "z+"):
-            load = DistributedLoad(element_id=elem.id, wx=0.0, wy=0.0, wz=w_mag)
+            load = DistributedLoad(element_id=elem.id, wx=0.0, wy=0.0, wz=w_mag, is_self_weight=True)
         elif dir_lower in ("-y", "y-", "down_y"):
-            load = DistributedLoad(element_id=elem.id, wx=0.0, wy=-w_mag, wz=0.0)
+            load = DistributedLoad(element_id=elem.id, wx=0.0, wy=-w_mag, wz=0.0, is_self_weight=True)
         elif dir_lower in ("+y", "y+"):
-            load = DistributedLoad(element_id=elem.id, wx=0.0, wy=w_mag, wz=0.0)
+            load = DistributedLoad(element_id=elem.id, wx=0.0, wy=w_mag, wz=0.0, is_self_weight=True)
         elif dir_lower in ("-x", "x-"):
-            load = DistributedLoad(element_id=elem.id, wx=-w_mag, wy=0.0, wz=0.0)
+            load = DistributedLoad(element_id=elem.id, wx=-w_mag, wy=0.0, wz=0.0, is_self_weight=True)
         elif dir_lower in ("+x", "x+"):
-            load = DistributedLoad(element_id=elem.id, wx=w_mag, wy=0.0, wz=0.0)
+            load = DistributedLoad(element_id=elem.id, wx=w_mag, wy=0.0, wz=0.0, is_self_weight=True)
         else:
-            load = DistributedLoad(element_id=elem.id, wx=0.0, wy=0.0, wz=-w_mag)
+            load = DistributedLoad(element_id=elem.id, wx=0.0, wy=0.0, wz=-w_mag, is_self_weight=True)
 
         element_loads.append(load)
 
@@ -187,7 +187,7 @@ def apply_self_weight(
     source : StructuralModel or Project
         The structural model or project to update.
     target_case_id : str, optional
-        Target load case ID if no case currently has include_self_weight=True. Default: "DEAD".
+        Target load case ID if no case currently has include_self_weight=True. Default: "SelfWeight".
     gravity_accel : float, optional
         Acceleration due to gravity. Inferred from model units if None.
     units : str, Units, or dict, optional
@@ -321,13 +321,13 @@ def apply_self_weight(
                 units=units,
                 direction=direction,
             )
-            lc.element_loads.extend(sw_case.element_loads)
+            already_eids = {dl.element_id for dl in lc.element_loads if getattr(dl, "is_self_weight", False)}
+            new_loads = [dl for dl in sw_case.element_loads if dl.element_id not in already_eids]
+            lc.element_loads.extend(new_loads)
             lc.include_self_weight = False
     else:
         target_id = target_case_id or "DEAD"
         target_case = next((lc for lc in model.load_cases if str(lc.id).upper() == str(target_id).upper()), None)
-        if not target_case:
-            target_case = next((lc for lc in model.load_cases if "DEAD" in str(lc.id).upper()), None)
 
         sw_case = calculate_self_weight(
             model=model,
@@ -338,7 +338,9 @@ def apply_self_weight(
         )
 
         if target_case:
-            target_case.element_loads.extend(sw_case.element_loads)
+            already_eids = {dl.element_id for dl in target_case.element_loads if getattr(dl, "is_self_weight", False)}
+            new_loads = [dl for dl in sw_case.element_loads if dl.element_id not in already_eids]
+            target_case.element_loads.extend(new_loads)
             target_case.include_self_weight = False
         else:
             sw_case.include_self_weight = False

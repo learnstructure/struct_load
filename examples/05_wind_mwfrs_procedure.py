@@ -154,7 +154,7 @@ def demo_apply_wind_to_model():
     print("=" * 70)
 
     # 2-story building frame
-    model = StructuralModel()
+    model = StructuralModel(units="kN, m")
     for z, z_val in enumerate([0.0, 4.0, 8.0]):
         base_id = z * 2
         model.nodes.extend([

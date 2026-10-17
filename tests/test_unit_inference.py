@@ -59,3 +59,46 @@ def test_units_auto_inference_si():
     assert len(live_case.element_loads) > 0
     first_live = live_case.element_loads[0]
     assert abs(first_live.wz) == pytest.approx(7.68, rel=0.01)
+
+
+def test_units_canonical_string_inference():
+    model = build_3d_frame_model()
+    # Direct canonical string initialization
+    project = Project(model=model, units="kip, in")
+    gen = LoadGenerator()
+    u = gen.get_units(project)
+    assert u.force == "kip"
+    assert u.length == "in"
+
+    model_si = build_3d_frame_model()
+    model_si.units = "kN, m"
+    u_si = gen.get_units(model_si)
+    assert u_si.force == "kN"
+    assert u_si.length == "m"
+
+
+def test_apply_gravity_loads_no_double_counting():
+    """Verify materialized self-weight sets include_self_weight=False to prevent double counting."""
+    from struct_load import apply_self_weight
+
+    model = build_3d_frame_model()
+    model.units = "kN, m"
+    gen = LoadGenerator()
+
+    dead_case, live_case = gen.apply_gravity_loads(
+        model,
+        occupancy="office",
+        tributary_width=4.0,
+        superimposed_dead=1.5,
+        include_self_weight=True,
+    )
+
+    # include_self_weight must be False because self-weight is already in element_loads
+    assert dead_case.include_self_weight is False
+    loads_before = len(dead_case.element_loads)
+    assert loads_before > 0
+
+    # Running apply_self_weight should NOT add loads again since include_self_weight is False
+    apply_self_weight(model, target_case_id=dead_case.id)
+    # The dead case should maintain the exact same loads
+    assert len(dead_case.element_loads) == loads_before

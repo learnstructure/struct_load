@@ -88,11 +88,10 @@ roof_cases = generator.apply_roof_loads(
 )
 
 # Apply ASCE 7 seismic ELF lateral loads in both directions (X and Y)
+params = SeismicParameters(sds=0.75, sd1=0.40, r_factor=8.0)
 seismic_cases, elf_res = generator.apply_lateral_seismic(
     project,
-    sds=0.75,
-    sd1=0.40,
-    r_factor=8.0,
+    params=params,
     direction="both",
 )
 
@@ -134,9 +133,9 @@ struct.apply_self_weight()      # via method on fem3d/fem2d Structure
 # or: apply_self_weight(struct)
 
 # Option B: Schema model application (infers units and direction automatically)
-apply_self_weight(project)
-# Element loads are computed from material unit_weight and section area,
-# appended to DEAD case.element_loads, with case.include_self_weight set to False.
+apply_self_weight(project)  # supports in-place and return: project = apply_self_weight(project)
+# Element loads are computed from material unit_weight (or rho * g) and section area,
+# appended to DEAD case.element_loads (with is_self_weight=True), and case.include_self_weight is set to False.
 ```
 
 ---

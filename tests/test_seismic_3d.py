@@ -4,7 +4,7 @@ Tests for 3D model-derived seismic weights and multi-axis lateral loads in struc
 
 import pytest
 from struct_core import Metadata, Project
-from struct_load import LoadGenerator
+from struct_load import LoadGenerator, SeismicParameters
 from helpers import build_3d_frame_model
 
 
@@ -43,12 +43,12 @@ def test_apply_lateral_seismic_3d_both_directions():
     gen.apply_gravity_loads(project, include_self_weight=True)
 
     # Apply seismic loads in both directions
+    params = SeismicParameters(sds=0.75, sd1=0.40, r_factor=8.0)
     cases, elf_res = gen.apply_lateral_seismic(
         project,
-        sds=0.75,
-        sd1=0.40,
-        r_factor=8.0,
+        params=params,
         direction="both",
+        distribution="face",
     )
 
     assert isinstance(cases, list)
@@ -60,8 +60,8 @@ def test_apply_lateral_seismic_3d_both_directions():
     case_x = next(c for c in cases if c.id == "EQ_X")
     case_y = next(c for c in cases if c.id == "EQ_Y")
 
-    assert len(case_x.point_loads) == 2  # 2 story levels
-    assert len(case_y.point_loads) == 2
+    assert len(case_x.point_loads) == 4  # 2 face nodes per story * 2 stories
+    assert len(case_y.point_loads) == 4
 
     # Check X loads have fx > 0 and fy == 0
     for pl in case_x.point_loads:

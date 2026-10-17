@@ -93,6 +93,7 @@ def build_3story_building():
         sections=[sec_col, sec_beam],
         load_cases=[lc_dead, lc_live],
         story_elevations=[3.5, 7.0, 10.5],
+        units="kN, m",
     )
     return model
 
@@ -134,7 +135,7 @@ def main():
     print(f"  {'Elevation (m)':<15} {'Story Mass (tonnes)':<20} {'Story Weight (kN)':<20}")
     print("  " + "-" * 55)
     for elev, m_story in sorted(result.story_masses.items()):
-        w_story = m_story * 9.80665
+        w_story = m_story * model.units.gravity_acceleration
         print(f"  {elev:<15.2f} {m_story:<20.2f} {w_story:<20.2f}")
 
     print("\n" + "=" * 70)

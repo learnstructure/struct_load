@@ -8,8 +8,13 @@ from .codes.asce7_seismic import (
     SeismicParameters,
     StoryForceResult,
     approximate_fundamental_period,
+    calculate_cw,
+    calculate_design_response_spectrum,
     calculate_seismic_elf,
     calculate_seismic_response_coefficient,
+    check_sds_cap_eligibility,
+    evaluate_design_spectral_acceleration,
+    get_cu_coefficient,
 )
 from .codes.asce7_snow import (
     SnowParameters,
@@ -65,12 +70,17 @@ __all__ = [
     "calculate_live_load_reduction",
     # Combinations
     "generate_asce7_combinations",
-    # Seismic ELF
+    # Seismic ELF & Spectrum
     "SeismicParameters",
     "StoryForceResult",
     "approximate_fundamental_period",
     "calculate_seismic_response_coefficient",
     "calculate_seismic_elf",
+    "calculate_design_response_spectrum",
+    "evaluate_design_spectral_acceleration",
+    "check_sds_cap_eligibility",
+    "get_cu_coefficient",
+    "calculate_cw",
     # Wind MWFRS
     "WindParameters",
     "StoryWindResult",

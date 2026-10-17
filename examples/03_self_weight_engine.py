@@ -53,7 +53,8 @@ def demo_unit_self_weight():
 
     rho_conc = 2400.0  # kg/m3
     rho_steel = 7850.0  # kg/m3
-    g = 9.80665
+    units_si = Units(force="kN", length="m")
+    g = units_si.gravity_acceleration
 
     w_rc = (rho_conc * area_rc * g) / 1000.0
     w_circ = (rho_conc * area_circ * g) / 1000.0
@@ -79,7 +80,7 @@ def demo_2d_plane_frame_self_weight():
     print("=" * 70)
 
     # Portal Frame: Span = 6.0 m, Story Height = 3.5 m
-    model = StructuralModel()
+    model = StructuralModel(units="kN, m")
 
     # Nodes (X, Y)
     model.nodes.extend([
@@ -136,7 +137,7 @@ def demo_3d_space_frame_self_weight():
     print("=" * 70)
 
     # 3D Bay: 6m x 5m in plan, 4m height
-    model = StructuralModel()
+    model = StructuralModel(units="kN, m")
 
     # Ground nodes
     model.nodes.extend([
@@ -171,21 +172,19 @@ def demo_3d_space_frame_self_weight():
             BeamElement(id=i, type="beam", start_node=n1, end_node=n2, material_id=mat.id, section_id=sec_bm.id)
         )
 
-    # Wrap inside struct_core.Project with SI metadata
+    # Wrap inside struct_core.Project with canonical units
     project = Project(
-        metadata=Metadata(
-            title="3D Portal Building Frame",
-            units=Units(length="m", force="kN"),
-        ),
         model=model,
+        units="kN, m",
+        metadata=Metadata(title="3D Portal Building Frame"),
     )
 
     # Materialize self weight via Project wrapper
     apply_self_weight(project)
 
-    dead_case = next(lc for lc in project.model.load_cases if "dead" in str(lc.id).lower())
+    dead_case = next(lc for lc in project.model.load_cases if any(k in str(lc.id).lower() for k in ("selfweight", "dead")))
     print(f"Project Units detected automatically: SI")
-    print(f"Generated {len(dead_case.element_loads)} 3D self-weight line loads:")
+    print(f"Generated {len(dead_case.element_loads)} 3D self-weight line loads (Case: {dead_case.id}):")
 
     total_weight = 0.0
     nodes_map = {n.id: n for n in model.nodes}
@@ -198,7 +197,8 @@ def demo_3d_space_frame_self_weight():
         total_weight += total_elem_w
         print(f"  Element #{elem.id:02d} ({elem.section_id}): L = {L:4.1f}m, wz = {dl.wz:6.3f} kN/m, total = {total_elem_w:6.2f} kN")
 
-    print(f"\nTotal Structure Self-Weight = {total_weight:.2f} kN ({total_weight / 9.80665:.2f} tonnes)")
+    g_accel = project.units.gravity_acceleration
+    print(f"\nTotal Structure Self-Weight = {total_weight:.2f} kN ({total_weight / g_accel:.2f} tonnes)")
 
 
 def main():

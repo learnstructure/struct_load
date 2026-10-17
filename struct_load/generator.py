@@ -44,6 +44,7 @@ from .engine.geometry import (
     get_beam_length,
     is_horizontal_beam,
 )
+from .engine.mass_source import calculate_mass_source
 from .engine.self_weight import calculate_section_area, calculate_self_weight
 from .engine.tributary import (
     apply_floor_load_to_frame,
@@ -169,15 +170,16 @@ class LoadGenerator:
                         wx=round(existing.wx + sw_load.wx, 4),
                         wy=round(existing.wy + sw_load.wy, 4),
                         wz=round(existing.wz + sw_load.wz, 4),
+                        is_self_weight=True,
                     )
                 else:
                     combined_dead_loads[eid] = sw_load
 
         final_dead_case = LoadCase(
             id=dead_case_id,
-            name="Dead Load (Self-Weight + SDL)",
+            name="Dead Load (Self-Weight + SDL)" if include_self_weight else "Dead Load (SDL)",
             element_loads=list(combined_dead_loads.values()),
-            include_self_weight=include_self_weight,
+            include_self_weight=False,
         )
 
         # Attach / replace in model (case-insensitive ID match)
@@ -417,24 +419,67 @@ class LoadGenerator:
     def apply_lateral_seismic(
         self,
         model_or_project: Union[StructuralModel, Project],
-        sds: float = 0.75,
-        sd1: float = 0.40,
-        r_factor: float = 8.0,
-        system_type: str = "rc_smf",
-        importance_factor: float = 1.0,
-        tributary_width: float = 5.0,
+        params: Optional[SeismicParameters] = None,
         direction: str = "both",
-        seismic_case_id: str = "EQ_X",
+        seismic_case_id: Optional[str] = None,
         story_elevations: Optional[List[float]] = None,
+        mass_source: Optional[Union[Any, str]] = None,
+        story_weights: Optional[List[float]] = None,
+        custom_period: Optional[float] = None,
+        distribution: str = "face",
     ) -> Tuple[Union[LoadCase, List[LoadCase]], StoryForceResult]:
         """
         Apply ASCE 7 Equivalent Lateral Force (ELF) seismic loads to floor joints.
-        Computes exact model-derived story seismic weights from dead loads and element sections.
+
+        Computes exact model-derived story seismic weights from mass sources, dead loads,
+        and element sections, and determines design base shear V and story lateral forces Fx.
         Supports 2D and 3D directional seismic ('X', 'Y', or 'both').
+
+        When direction='both' in 3D models, two separate and independent load cases are generated
+        (e.g. 'EQ_X' and 'EQ_Y') so that orthogonal seismic loads do not act simultaneously.
+
+        Parameters
+        ----------
+        model_or_project : StructuralModel or Project
+            Target structural model or project container.
+        params : SeismicParameters, optional
+            Seismic design criteria (sds, sd1, r_factor, importance_factor, tl, system_type, s1).
+            If None, default parameters (SDS=0.75, SD1=0.40, R=8.0) are assumed.
+        direction : str, optional
+            Seismic loading direction: 'X', 'Y', or 'both' (default: 'both').
+        seismic_case_id : str, optional
+            Custom load case ID. If direction='both', suffixes '_X' and '_Y' are appended
+            (e.g. 'EQ' -> 'EQ_X', 'EQ_Y'). Defaults to 'EQ_X' and 'EQ_Y'.
+        story_elevations : List[float], optional
+            Story elevations above base. Inferred automatically from geometry if None.
+        mass_source : MassSource, dict, or str, optional
+            Mass source specification defining load multipliers and element self-mass.
+            If None, uses model.mass_source or derives weights from dead load cases.
+        story_weights : List[float], optional
+            Directly specified story seismic weights W_i. Overrides automatic calculation if provided.
+        custom_period : float, optional
+            Calculated or modal fundamental period T (s). Subject to upper limit Cu*Ta per ASCE 7 Section 12.8.2.
+        distribution : str, optional
+            Horizontal distribution pattern of story lateral forces among floor nodes:
+            - 'face' (default): distributes story force equally across nodes on the exterior boundary
+              frame face along the loading direction (min x for X-direction, min y for Y-direction).
+            - 'uniform': distributes story force equally across all floor nodes at that story elevation.
+
+        Returns
+        -------
+        Tuple[Union[LoadCase, List[LoadCase]], StoryForceResult]
+            - Generated LoadCase (or list of [case_x, case_y] if direction='both')
+            - StoryForceResult dataclass with base shear, Cs, period, total weight, and story forces.
         """
         model = self._unwrap_model(model_or_project)
         active_units = self.get_units(model_or_project)
         is_3d = detect_model_dimensionality(model) == "3d"
+
+        dist_choice = distribution.lower().strip()
+        if dist_choice not in ("face", "uniform"):
+            raise ValueError(
+                f"Invalid distribution '{distribution}'. Must be 'face' or 'uniform'."
+            )
 
         elevations = story_elevations or self.detect_story_elevations(model)
         if not elevations:
@@ -442,8 +487,17 @@ class LoadGenerator:
                 "No story elevations detected in model. Specify story_elevations or ensure model geometry has defined floor levels."
             )
 
-        # Calculate exact story weights from model dead loads & sections
-        exact_weights = self.calculate_model_seismic_weight(model, elevations)
+        # Calculate exact story weights from explicit input, mass source, or dead loads
+        if story_weights is not None:
+            exact_weights = list(story_weights)
+        elif mass_source is not None or getattr(model, "mass_source", None) is not None:
+            ms_target = mass_source if mass_source is not None else getattr(model, "mass_source", None)
+            ms_res = calculate_mass_source(model, mass_source=ms_target, units=active_units)
+            exact_weights = [round(ms_res.story_weights.get(elev, 0.0), 2) for elev in elevations]
+            if sum(exact_weights) <= 1e-3:
+                exact_weights = self.calculate_model_seismic_weight(model, elevations)
+        else:
+            exact_weights = self.calculate_model_seismic_weight(model, elevations)
 
         # Ensure model has defined dead loads/sections
         if sum(exact_weights) <= 1e-3:
@@ -451,29 +505,50 @@ class LoadGenerator:
                 "Model has zero effective seismic weight W. Ensure dead load cases, member sections, or materials are defined on the model."
             )
 
-        params = SeismicParameters(
-            sds=sds,
-            sd1=sd1,
-            r_factor=r_factor,
-            importance_factor=importance_factor,
-            system_type=system_type,
+        seismic_params = params or SeismicParameters(
+            sds=0.75,
+            sd1=0.40,
+            r_factor=8.0,
+            importance_factor=1.0,
+            system_type="rc_smf",
         )
 
         elf_result = calculate_seismic_elf(
             story_elevations=elevations,
             story_weights=exact_weights,
-            params=params,
+            params=seismic_params,
             units=active_units,
+            custom_period=custom_period,
         )
 
         dir_choice = direction.upper().strip()
         do_x = dir_choice in ("X", "BOTH")
-        do_y = dir_choice in ("Y", "BOTH") and is_3d
+        do_y = dir_choice in ("Y", "BOTH")
+
+        if do_y and not is_3d:
+            if dir_choice == "Y":
+                raise ValueError(
+                    "Y-direction lateral seismic load is not applicable to 2D models where Y is the vertical gravity axis."
+                )
+            do_y = False
+
+        if not do_x and not do_y:
+            raise ValueError(f"Invalid direction '{direction}'. Must be 'X', 'Y', or 'both'.")
 
         cases_created: List[LoadCase] = []
 
+        if do_x and do_y:
+            base_id = seismic_case_id.rstrip("_XY") if seismic_case_id else "EQ"
+            case_id_x = f"{base_id}_X"
+            case_id_y = f"{base_id}_Y"
+        elif do_x:
+            case_id_x = seismic_case_id or "EQ_X"
+            case_id_y = None
+        else:
+            case_id_x = None
+            case_id_y = seismic_case_id or "EQ_Y"
+
         if do_x:
-            case_id = seismic_case_id if not do_y else "EQ_X"
             point_loads_x: List[PointLoad] = []
             for idx, elev in enumerate(elevations):
                 fx = elf_result.story_forces[idx + 1]
@@ -483,21 +558,27 @@ class LoadGenerator:
                 ]
                 if not floor_nodes:
                     continue
-                # Apply to left-most node or centroid
-                target_node = min(floor_nodes, key=lambda n: n.x)
-                point_loads_x.append(PointLoad(node_id=target_node.id, fx=round(fx, 3)))
+                if dist_choice == "face":
+                    min_x = min(n.x for n in floor_nodes)
+                    face_nodes = [n for n in floor_nodes if abs(n.x - min_x) <= 0.05]
+                    f_node = fx / len(face_nodes)
+                    for target_node in face_nodes:
+                        point_loads_x.append(PointLoad(node_id=target_node.id, fx=round(f_node, 4)))
+                else:  # uniform
+                    f_node = fx / len(floor_nodes)
+                    for target_node in floor_nodes:
+                        point_loads_x.append(PointLoad(node_id=target_node.id, fx=round(f_node, 4)))
 
             case_x = LoadCase(
-                id=case_id,
+                id=case_id_x,
                 name="Seismic Load (ASCE 7 ELF - X)",
                 point_loads=point_loads_x,
             )
-            model.load_cases = [lc for lc in model.load_cases if lc.id != case_id]
+            model.load_cases = [lc for lc in model.load_cases if lc.id != case_id_x]
             model.load_cases.append(case_x)
             cases_created.append(case_x)
 
         if do_y:
-            case_id = "EQ_Y" if do_x else seismic_case_id
             point_loads_y: List[PointLoad] = []
             for idx, elev in enumerate(elevations):
                 fy = elf_result.story_forces[idx + 1]
@@ -507,15 +588,23 @@ class LoadGenerator:
                 ]
                 if not floor_nodes:
                     continue
-                target_node = min(floor_nodes, key=lambda n: n.y)
-                point_loads_y.append(PointLoad(node_id=target_node.id, fy=round(fy, 3)))
+                if dist_choice == "face":
+                    min_y = min(n.y for n in floor_nodes)
+                    face_nodes = [n for n in floor_nodes if abs(n.y - min_y) <= 0.05]
+                    f_node = fy / len(face_nodes)
+                    for target_node in face_nodes:
+                        point_loads_y.append(PointLoad(node_id=target_node.id, fy=round(f_node, 4)))
+                else:  # uniform
+                    f_node = fy / len(floor_nodes)
+                    for target_node in floor_nodes:
+                        point_loads_y.append(PointLoad(node_id=target_node.id, fy=round(f_node, 4)))
 
             case_y = LoadCase(
-                id=case_id,
+                id=case_id_y,
                 name="Seismic Load (ASCE 7 ELF - Y)",
                 point_loads=point_loads_y,
             )
-            model.load_cases = [lc for lc in model.load_cases if lc.id != case_id]
+            model.load_cases = [lc for lc in model.load_cases if lc.id != case_id_y]
             model.load_cases.append(case_y)
             cases_created.append(case_y)
 

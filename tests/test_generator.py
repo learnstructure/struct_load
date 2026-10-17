@@ -12,6 +12,7 @@ from struct_core import (
     StructuralModel,
     Support,
 )
+from struct_load.codes.asce7_seismic import SeismicParameters
 from struct_load.generator import LoadGenerator
 
 
@@ -61,11 +62,10 @@ def test_load_generator_gravity_and_combinations():
     assert b2_live.wy == pytest.approx(-15.6, rel=0.05)
 
     # 2. Apply lateral seismic load
+    params = SeismicParameters(sds=0.75, sd1=0.40, r_factor=8.0)
     eq_case, elf_res = gen.apply_lateral_seismic(
         project,
-        sds=0.75,
-        sd1=0.40,
-        r_factor=8.0,
+        params=params,
     )
     assert eq_case.id == "EQ_X"
     assert len(eq_case.point_loads) == 1
