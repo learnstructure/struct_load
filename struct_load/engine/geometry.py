@@ -12,25 +12,37 @@ from struct_core import Node, StructuralModel
 
 def detect_model_dimensionality(model: StructuralModel, tolerance: float = 1e-4) -> str:
     """
-    Detect whether a structural model is 2D (plane frame in X-Y) or 3D (space frame in X-Y-Z).
+    Detect whether a structural model is 2D (plane frame in X-Y or X-Z) or 3D (space frame in X-Y-Z).
 
     Parameters
     ----------
     model : StructuralModel
         The structural frame model.
     tolerance : float
-        Coordinate threshold above which Z coordinates are treated as 3D.
+        Coordinate threshold above which spatial extent is treated as non-zero.
 
     Returns
     -------
     str
-        '3d' if any node has abs(z) > tolerance, otherwise '2d'.
+        '3d' if the model has non-zero spatial extent along all 3 dimensions, otherwise '2d'.
     """
-    for node in model.nodes:
-        z = getattr(node, "z", 0.0) or 0.0
-        if abs(z) > tolerance:
-            return "3d"
-    return "2d"
+    dim = getattr(model, "dimension", None)
+    if dim and str(dim).upper() in ("2D", "3D"):
+        return str(dim).lower()
+
+    if not getattr(model, "nodes", None):
+        return "2d"
+
+    xs = [float(n.x) for n in model.nodes]
+    ys = [float(n.y) for n in model.nodes]
+    zs = [float(getattr(n, "z", 0.0) or 0.0) for n in model.nodes]
+
+    span_x = max(xs) - min(xs)
+    span_y = max(ys) - min(ys)
+    span_z = max(zs) - min(zs)
+
+    dims_with_extent = sum(1 for span in (span_x, span_y, span_z) if span > tolerance)
+    return "3d" if dims_with_extent >= 3 else "2d"
 
 
 def detect_story_elevations(
@@ -62,7 +74,11 @@ def detect_story_elevations(
         if filtered:
             return filtered
 
+    from struct_core import vertical_axis as get_vertical_axis
+
     is_3d = detect_model_dimensionality(model, tolerance=tolerance) == "3d"
+    v_axis = get_vertical_axis(model)
+    use_z = (v_axis == "z")
     nodes_map = {n.id: n for n in model.nodes}
 
     # Gather elevations from horizontal beams first (most accurate structural indicator)
@@ -76,15 +92,15 @@ def detect_story_elevations(
         if not n_start or not n_end:
             continue
 
-        if is_horizontal_beam(elem, nodes_map, is_3d=is_3d, tolerance=tolerance):
-            elev = get_beam_elevation(elem, nodes_map, is_3d=is_3d)
+        if is_horizontal_beam(elem, nodes_map, is_3d=is_3d, tolerance=tolerance, vertical_axis=v_axis):
+            elev = get_beam_elevation(elem, nodes_map, is_3d=is_3d, vertical_axis=v_axis)
             if elev > tolerance:
                 beam_elevs.append(round(elev, 4))
 
     raw_elevs = beam_elevs if beam_elevs else [
-        round(float(getattr(n, "z", 0.0) if is_3d else getattr(n, "y", 0.0)), 4)
+        round(float(getattr(n, "z", 0.0) if use_z else getattr(n, "y", 0.0)), 4)
         for n in model.nodes
-        if float(getattr(n, "z", 0.0) if is_3d else getattr(n, "y", 0.0)) > tolerance
+        if float(getattr(n, "z", 0.0) if use_z else getattr(n, "y", 0.0)) > tolerance
     ]
 
     unique_sorted = sorted(list(set(raw_elevs)))
@@ -99,23 +115,28 @@ def detect_story_elevations(
 def is_horizontal_beam(
     elem: Any,
     nodes_map: Dict[Any, Node],
-    is_3d: bool,
+    is_3d: bool = False,
     tolerance: float = 0.05,
+    vertical_axis: Optional[str] = None,
 ) -> bool:
     """
     Check if a beam element is oriented horizontally at a floor elevation.
 
     - In 3D: start and end nodes have matching Z coordinates (|z1 - z2| <= tol)
       and span length in X-Y plane > tolerance.
-    - In 2D: start and end nodes have matching Y coordinates (|y1 - y2| <= tol)
-      and span length in X > tolerance.
+    - In 2D:
+      - If vertical_axis == 'z': start and end nodes have matching Z coordinates (|z1 - z2| <= tol)
+        and span length in X-Y plane > tolerance.
+      - If vertical_axis == 'y' (default): start and end nodes have matching Y coordinates (|y1 - y2| <= tol)
+        and span length in X > tolerance.
     """
     n_start = nodes_map.get(elem.start_node)
     n_end = nodes_map.get(elem.end_node)
     if not n_start or not n_end:
         return False
 
-    if is_3d:
+    v_axis = (vertical_axis or ("z" if is_3d else "y")).lower()
+    if v_axis == "z":
         z_start = getattr(n_start, "z", 0.0) or 0.0
         z_end = getattr(n_end, "z", 0.0) or 0.0
         dz = abs(z_start - z_end)
@@ -130,14 +151,16 @@ def is_horizontal_beam(
 def get_beam_elevation(
     elem: Any,
     nodes_map: Dict[Any, Node],
-    is_3d: bool,
+    is_3d: bool = False,
+    vertical_axis: Optional[str] = None,
 ) -> float:
     """
-    Get the mid-elevation of a beam element (Z for 3D, Y for 2D).
+    Get the mid-elevation of a beam element (Z for vertical_axis == 'z' or 3D, Y for 2D).
     """
     n_start = nodes_map[elem.start_node]
     n_end = nodes_map[elem.end_node]
-    if is_3d:
+    v_axis = (vertical_axis or ("z" if is_3d else "y")).lower()
+    if v_axis == "z":
         z1 = getattr(n_start, "z", 0.0) or 0.0
         z2 = getattr(n_end, "z", 0.0) or 0.0
         return (z1 + z2) / 2.0

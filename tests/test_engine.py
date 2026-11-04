@@ -30,19 +30,19 @@ def _build_portal_frame():
         Node(id=4, x=6.0, y=0.0),
     ]
     mat = ElasticMaterial(id="Conc", E=2.5e7, rho=2400.0)  # 2400 kg/m3
-    sec_beam = RectangularSection(id="B1", b=0.30, h=0.50)  # Area = 0.15 m2
-    sec_col = RectangularSection(id="C1", b=0.40, h=0.40)   # Area = 0.16 m2
+    sec_beam = RectangularSection(id="B1", material_id="Conc", b=0.30, h=0.50)  # Area = 0.15 m2
+    sec_col = RectangularSection(id="C1", material_id="Conc", b=0.40, h=0.40)   # Area = 0.16 m2
 
     elements = [
-        BeamElement(id=1, start_node=1, end_node=2, material_id="Conc", section_id="C1"),
-        BeamElement(id=2, start_node=2, end_node=3, material_id="Conc", section_id="B1"),
-        BeamElement(id=3, start_node=4, end_node=3, material_id="Conc", section_id="C1"),
+        BeamElement(id=1, start_node=1, end_node=2, section_id="C1"),
+        BeamElement(id=2, start_node=2, end_node=3, section_id="B1"),
+        BeamElement(id=3, start_node=4, end_node=3, section_id="C1"),
     ]
-    return StructuralModel(nodes=nodes, materials=[mat], sections=[sec_beam, sec_col], elements=elements)
+    return StructuralModel(units="kN, m", nodes=nodes, materials=[mat], sections=[sec_beam, sec_col], elements=elements)
 
 
 def test_section_area():
-    rec = RectangularSection(id="R1", b=0.30, h=0.50)
+    rec = RectangularSection(id="R1", material_id="M", b=0.30, h=0.50)
     assert calculate_section_area(rec) == pytest.approx(0.15)
 
 
@@ -110,3 +110,11 @@ def test_apply_self_weight_3d_with_unit_weight():
     assert beam_ld.wz == pytest.approx(-3.6)
     assert beam_ld.wy == 0.0
     assert dead_case.include_self_weight is False
+
+
+def test_self_weight_needs_a_material_density():
+    """No density is assumed: a material with neither unit_weight nor rho cannot give a self-weight."""
+    model = _build_portal_frame()
+    model.materials[0] = model.materials[0].model_copy(update={"unit_weight": None, "rho": 0.0})
+    with pytest.raises(ValueError, match="has no density"):
+        calculate_self_weight(model, load_case_id="SW", units="kN, m")

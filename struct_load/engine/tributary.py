@@ -7,7 +7,7 @@ Supports both 2D plane frames (gravity along -Y) and 3D space frames (gravity al
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Literal, Dict, List, Optional, Set, Tuple, Union
 from struct_core import (
     AreaLoad,
     DistributedLoad,
@@ -147,21 +147,238 @@ def distribute_two_way_slab(
     return round(w_peak, 4), round(w_eq_short, 4), round(w_eq_long, 4)
 
 
+def _distribute_3d_floor_panels(
+    model: StructuralModel,
+    pressure: float,
+    story_elevations: List[float],
+    direction: str = "-z",
+    design_action: str = "shear",
+    tolerance: float = 0.05,
+    allow_partial_floor: bool = False,
+) -> Tuple[Dict[Union[int, str], float], Dict[float, float], List[Union[int, str]]]:
+    """
+    Detect rectangular panels in a 3D building frame at each story elevation,
+    and compute equivalent uniform line loads on bounding beams using two-way
+    yield-line theory (distribute_two_way_slab with shear equilibrium).
+    Returns a dict mapping element_id -> line_load_magnitude.
+    """
+    nodes_map = {n.id: n for n in model.nodes}
+    beam_loads: Dict[Union[int, str], float] = {}
+    loaded_areas_by_elev: Dict[float, float] = {}
+    unloaded_beams: List[Union[int, str]] = []
+
+    for elev in story_elevations:
+        elev_beams = []
+        for elem in getattr(model, "elements", []):
+            elem_type = str(getattr(elem, "type", "")).lower()
+            if elem_type not in ("beam", "frame", ""):
+                continue
+            if not is_horizontal_beam(elem, nodes_map, is_3d=True, tolerance=tolerance):
+                continue
+            be = get_beam_elevation(elem, nodes_map, is_3d=True)
+            if abs(be - elev) <= tolerance:
+                elev_beams.append(elem)
+
+        if not elev_beams:
+            continue
+
+        x_beams: Dict[Tuple[float, float, float], Any] = {}
+        y_beams: Dict[Tuple[float, float, float], Any] = {}
+        all_x = set()
+        all_y = set()
+
+        for b in elev_beams:
+            n1 = nodes_map.get(b.start_node)
+            n2 = nodes_map.get(b.end_node)
+            if not n1 or not n2:
+                continue
+            x1, y1 = round(float(n1.x), 2), round(float(n1.y), 2)
+            x2, y2 = round(float(n2.x), 2), round(float(n2.y), 2)
+            all_x.update([x1, x2])
+            all_y.update([y1, y2])
+
+            if abs(y1 - y2) <= tolerance and abs(x1 - x2) > tolerance:
+                y_pos = round((y1 + y2) / 2.0, 2)
+                min_x = min(x1, x2)
+                max_x = max(x1, x2)
+                x_beams[(y_pos, min_x, max_x)] = b
+            elif abs(x1 - x2) <= tolerance and abs(y1 - y2) > tolerance:
+                x_pos = round((x1 + x2) / 2.0, 2)
+                min_y = min(y1, y2)
+                max_y = max(y1, y2)
+                y_beams[(x_pos, min_y, max_y)] = b
+
+        sorted_x = sorted(list(all_x))
+        sorted_y = sorted(list(all_y))
+
+        loaded_area_level = 0.0
+        outline_area_level = 0.0
+        loaded_beams_at_level = set()
+
+        for ix in range(len(sorted_x) - 1):
+            x_left = sorted_x[ix]
+            x_right = sorted_x[ix + 1]
+            lx = x_right - x_left
+            if lx <= tolerance:
+                continue
+
+            for iy in range(len(sorted_y) - 1):
+                y_bot = sorted_y[iy]
+                y_top = sorted_y[iy + 1]
+                ly = y_top - y_bot
+                if ly <= tolerance:
+                    continue
+
+                b_bot = x_beams.get((y_bot, x_left, x_right))
+                b_top = x_beams.get((y_top, x_left, x_right))
+                b_left = y_beams.get((x_left, y_bot, y_top))
+                b_right = y_beams.get((x_right, y_bot, y_top))
+
+                k = sum(1 for b in (b_bot, b_top, b_left, b_right) if b is not None)
+                if k >= 2:
+                    outline_area_level += lx * ly
+
+                if b_bot and b_top and b_left and b_right:
+                    loaded_area_level += lx * ly
+                    loaded_beams_at_level.update([b_bot.id, b_top.id, b_left.id, b_right.id])
+                    s = min(lx, ly)
+                    l = max(lx, ly)
+                    _, w_eq_short, w_eq_long = distribute_two_way_slab(
+                        pressure, s, l, design_action=design_action
+                    )
+                    if lx <= ly:
+                        w_x = w_eq_short
+                        w_y = w_eq_long
+                    else:
+                        w_x = w_eq_long
+                        w_y = w_eq_short
+
+                    for elem in (b_bot, b_top):
+                        beam_loads[elem.id] = beam_loads.get(elem.id, 0.0) + w_x
+                    for elem in (b_left, b_right):
+                        beam_loads[elem.id] = beam_loads.get(elem.id, 0.0) + w_y
+
+        loaded_areas_by_elev[elev] = round(loaded_area_level, 4)
+        if outline_area_level > tolerance:
+            if loaded_area_level < outline_area_level - 1e-4:
+                if not allow_partial_floor:
+                    missing_area = outline_area_level - loaded_area_level
+                    raise ValueError(
+                        f"Floor level z = {elev:.2f}: loaded panel area ({loaded_area_level:.2f}) "
+                        f"is less than floor outline area ({outline_area_level:.2f}) by {missing_area:.2f}. "
+                        f"Some floor bays are not closed by bounding beams. "
+                        f"Close the panels with beams, specify one_way_span ('x' or 'y'), "
+                        f"or set allow_partial_floor=True."
+                    )
+
+        for b in elev_beams:
+            if b.id not in loaded_beams_at_level:
+                unloaded_beams.append(b.id)
+
+    return beam_loads, loaded_areas_by_elev, unloaded_beams
+
+
+def _distribute_3d_one_way(
+    model: StructuralModel,
+    pressure: float,
+    story_elevations: Sequence[float],
+    one_way_span: str,
+    direction: str = "-z",
+    tolerance: float = 0.05,
+) -> Dict[Any, float]:
+    """
+    Distribute one-way slab pressure to horizontal beam lines in a 3D frame.
+
+    When one_way_span is 'y', the slab spans along Y between beam lines running in X.
+    Only beams running along X receive slab load; beams along Y receive no load.
+    Each beam line receives q * tributary_width, where tributary_width is half the
+    distance to the adjacent beam lines on each side (edge beam lines receive half-bay width).
+
+    When one_way_span is 'x', beams running along Y receive load based on bay spacing in X.
+    """
+    span_dir = one_way_span.lower().strip()
+    if span_dir not in ("x", "y"):
+        raise ValueError(f"one_way_span must be 'x' or 'y', got {one_way_span!r}")
+
+    nodes_map = {n.id: n for n in model.nodes}
+    elevs = list(story_elevations)
+    beam_loads: Dict[Any, float] = {}
+
+    for elev in elevs:
+        level_beams = []
+        for elem in getattr(model, "elements", []):
+            if str(getattr(elem, "type", "")).lower() not in ("beam", "frame", ""):
+                continue
+            ns = nodes_map.get(elem.start_node)
+            ne = nodes_map.get(elem.end_node)
+            if not ns or not ne:
+                continue
+            if abs(ns.z - elev) <= tolerance and abs(ne.z - elev) <= tolerance:
+                dx = abs(ne.x - ns.x)
+                dy = abs(ne.y - ns.y)
+                if dx > tolerance or dy > tolerance:
+                    level_beams.append((elem, ns, ne, dx, dy))
+
+        if not level_beams:
+            continue
+
+        if span_dir == "y":
+            # Slab spans along Y, supported by beams running along X (dx > dy)
+            supporting = [b for b in level_beams if b[3] > b[4] and b[3] > tolerance]
+            coords = sorted({round((b[1].y + b[2].y) / 2.0, 4) for b in supporting})
+            if not coords:
+                continue
+            trib_map = {}
+            for i, y_coord in enumerate(coords):
+                w_left = (y_coord - coords[i - 1]) / 2.0 if i > 0 else 0.0
+                w_right = (coords[i + 1] - y_coord) / 2.0 if i < len(coords) - 1 else 0.0
+                trib_map[y_coord] = w_left + w_right
+
+            for elem, ns, ne, dx, dy in supporting:
+                y_c = round((ns.y + ne.y) / 2.0, 4)
+                w_trib = trib_map.get(y_c, 0.0)
+                beam_loads[elem.id] = pressure * w_trib
+
+        elif span_dir == "x":
+            # Slab spans along X, supported by beams running along Y (dy > dx)
+            supporting = [b for b in level_beams if b[4] > b[3] and b[4] > tolerance]
+            coords = sorted({round((b[1].x + b[2].x) / 2.0, 4) for b in supporting})
+            if not coords:
+                continue
+            trib_map = {}
+            for i, x_coord in enumerate(coords):
+                w_left = (x_coord - coords[i - 1]) / 2.0 if i > 0 else 0.0
+                w_right = (coords[i + 1] - x_coord) / 2.0 if i < len(coords) - 1 else 0.0
+                trib_map[x_coord] = w_left + w_right
+
+            for elem, ns, ne, dx, dy in supporting:
+                x_c = round((ns.x + ne.x) / 2.0, 4)
+                w_trib = trib_map.get(x_c, 0.0)
+                beam_loads[elem.id] = pressure * w_trib
+
+    return beam_loads
+
+
 def apply_floor_load_to_frame(
     model: StructuralModel,
     pressure: float,
-    tributary_width: float,
-    target_case_id: str,
+    tributary_width: Optional[float] = None,
+    target_case_id: str = "FloorLoad",
     case_name: Optional[str] = None,
     story_elevations: Optional[List[float]] = None,
     direction: Optional[str] = None,
+    two_way: bool = False,
+    one_way_span: Optional[Literal["x", "y"]] = None,
     tolerance: float = 0.05,
+    load_type: Optional[str] = None,
+    allow_partial_floor: bool = False,
 ) -> LoadCase:
     """
     Distribute uniform floor pressure across horizontal beam elements at specified floor levels.
     Automatically senses whether model is 2D or 3D:
     - 2D: Story elevations along Y, horizontal beams in X, gravity load along -Y (wy).
     - 3D: Story elevations along Z, horizontal beams in X-Y, gravity load along -Z (wz).
+      When two_way=True, detects floor panels and distributes via 45-degree yield line.
 
     Parameters
     ----------
@@ -170,7 +387,7 @@ def apply_floor_load_to_frame(
     pressure : float
         Surface pressure intensity (kN/m² or psf).
     tributary_width : float
-        Tributary framing width (m or ft).
+        Tributary framing width (m or ft) for 1D beam tributary strip.
     target_case_id : str
         ID for the resulting LoadCase.
     case_name : str, optional
@@ -180,6 +397,8 @@ def apply_floor_load_to_frame(
         If None, automatically detected above ground level.
     direction : str, optional
         Direction of gravity: '-z' for 3D, '-y' for 2D. Inferred if None.
+    two_way : bool
+        If True in 3D, distributes floor loads across bounding beams using two-way yield lines.
     tolerance : float
         Elevation and coordinate matching tolerance.
 
@@ -188,16 +407,95 @@ def apply_floor_load_to_frame(
     LoadCase
         Configured struct_core.LoadCase with DistributedLoad elements.
     """
+    from struct_core import vertical_axis as get_vertical_axis
+
+    v_axis = get_vertical_axis(model)
     nodes_map = {n.id: n for n in model.nodes}
     element_loads: List[DistributedLoad] = []
 
     is_3d = detect_model_dimensionality(model, tolerance=tolerance) == "3d"
     if direction is None:
-        direction = "-z" if is_3d else "-y"
-
-    wx, wy, wz = distribute_tributary_load(pressure, tributary_width, direction=direction)
+        direction = "-z" if (is_3d or v_axis == "z") else "-y"
 
     elevs = story_elevations or detect_story_elevations(model, tolerance=tolerance)
+
+    if load_type is None:
+        cid_lower = str(target_case_id).lower()
+        if "dead" in cid_lower or "sdl" in cid_lower:
+            load_type = "dead"
+        elif "partition" in cid_lower:
+            load_type = "partition"
+        elif "live" in cid_lower:
+            load_type = "live"
+
+    if is_3d:
+        if two_way:
+            panel_loads, loaded_areas, unloaded = _distribute_3d_floor_panels(
+                model=model,
+                pressure=pressure,
+                story_elevations=elevs,
+                direction=direction,
+                tolerance=tolerance,
+                allow_partial_floor=allow_partial_floor,
+            )
+            if not panel_loads:
+                raise ValueError(
+                    f"No closed floor panels found at story levels {elevs}; specify one_way_span ('x' or 'y') in 3D "
+                    f"or tributary_width in 2D."
+                )
+            for eid, w_val in panel_loads.items():
+                element_loads.append(
+                    DistributedLoad(
+                        element_id=eid,
+                        wx=0.0,
+                        wy=0.0,
+                        wz=round(-float(w_val), 4),
+                    )
+                )
+            lc = LoadCase(
+                id=target_case_id,
+                name=case_name or f"Floor Load ({target_case_id})",
+                load_type=load_type,
+                element_loads=element_loads,
+            )
+            lc.loaded_floor_area = loaded_areas
+            lc.unloaded_beams = unloaded
+            return lc
+        else:
+            if tributary_width is not None and one_way_span is None:
+                raise ValueError(
+                    "tributary_width is for 2D frames only; in 3D specify one_way_span ('x' or 'y') or use two_way=True."
+                )
+            if one_way_span is None:
+                raise ValueError("one_way_span ('x' or 'y') is required for 3D one-way floor load distribution.")
+            one_way_loads = _distribute_3d_one_way(
+                model=model,
+                pressure=pressure,
+                story_elevations=elevs,
+                one_way_span=one_way_span,
+                direction=direction,
+                tolerance=tolerance,
+            )
+            for eid, w_val in one_way_loads.items():
+                element_loads.append(
+                    DistributedLoad(
+                        element_id=eid,
+                        wx=0.0,
+                        wy=0.0,
+                        wz=round(-float(w_val), 4),
+                    )
+                )
+            return LoadCase(
+                id=target_case_id,
+                name=case_name or f"Floor Load ({target_case_id})",
+                load_type=load_type,
+                element_loads=element_loads,
+            )
+
+    if tributary_width is None:
+        raise ValueError("tributary_width (model length unit) is required for 2D floor load distribution.")
+
+    wx, wy, wz = distribute_tributary_load(pressure, tributary_width, direction=direction)
 
     for elem in getattr(model, "elements", []):
         elem_type = str(getattr(elem, "type", "")).lower()
@@ -209,10 +507,10 @@ def apply_floor_load_to_frame(
         if not n_start or not n_end:
             continue
 
-        if not is_horizontal_beam(elem, nodes_map, is_3d=is_3d, tolerance=tolerance):
+        if not is_horizontal_beam(elem, nodes_map, is_3d=is_3d, tolerance=tolerance, vertical_axis=v_axis):
             continue
 
-        beam_elev = get_beam_elevation(elem, nodes_map, is_3d=is_3d)
+        beam_elev = get_beam_elevation(elem, nodes_map, is_3d=is_3d, vertical_axis=v_axis)
 
         if elevs is not None and len(elevs) > 0:
             matches = any(abs(beam_elev - elev) <= tolerance for elev in elevs)
@@ -231,9 +529,19 @@ def apply_floor_load_to_frame(
             )
         )
 
+    if load_type is None:
+        cid_lower = str(target_case_id).lower()
+        if "dead" in cid_lower or "sdl" in cid_lower:
+            load_type = "dead"
+        elif "partition" in cid_lower:
+            load_type = "partition"
+        elif "live" in cid_lower:
+            load_type = "live"
+
     return LoadCase(
         id=target_case_id,
         name=case_name or f"Floor Load ({target_case_id})",
+        load_type=load_type,
         element_loads=element_loads,
     )
 

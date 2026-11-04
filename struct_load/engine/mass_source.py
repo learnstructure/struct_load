@@ -16,6 +16,7 @@ from struct_core import (
     Project,
     StructuralModel,
     Units,
+    conversion_factor,
     parse_units,
 )
 
@@ -23,7 +24,7 @@ from .geometry import (
     detect_model_dimensionality,
     detect_story_elevations,
 )
-from .self_weight import calculate_section_area
+from .self_weight import calculate_section_area, material_weight_density
 
 
 @dataclass
@@ -56,11 +57,6 @@ class MassSourceResult:
     story_masses: Dict[float, float] = field(default_factory=dict)
     mass_source: Optional[MassSource] = None
     gravity_accel: float = 9.80665
-
-    @property
-    def total_weight(self) -> float:
-        """Alias for total_seismic_weight."""
-        return self.total_seismic_weight
 
     @property
     def story_weights(self) -> Dict[float, float]:
@@ -108,7 +104,10 @@ def calculate_mass_source(
     elif hasattr(model, "units") and units is None and model.units is not None:
         units = model.units
 
-    active_units = parse_units(units or "kN, m")
+    if units is None:
+        raise ValueError("Units unknown: pass units= or use a Project")
+
+    active_units = parse_units(units)
 
     if gravity_accel is None:
         gravity_accel = active_units.gravity_acceleration
@@ -144,6 +143,8 @@ def calculate_mass_source(
     else:
         raise TypeError(f"Unsupported mass_source type: {type(mass_source)}")
 
+    from struct_core import vertical_axis as get_vertical_axis
+    v_axis = get_vertical_axis(model)
     dim = detect_model_dimensionality(model)
     is_2d = dim == "2d"
 
@@ -163,16 +164,21 @@ def calculate_mass_source(
             m_val = getattr(n, "mass", 0.0)
             if isinstance(m_val, (int, float)) and m_val > 0.0:
                 if ms.lateral_only:
-                    nodal_masses[n.id][0] += float(m_val)
-                    if not is_2d:
+                    if v_axis == "z":
+                        nodal_masses[n.id][0] += float(m_val)
                         nodal_masses[n.id][1] += float(m_val)
+                    else:
+                        nodal_masses[n.id][0] += float(m_val)
+                        if not is_2d:
+                            nodal_masses[n.id][2] += float(m_val)
                 else:
                     nodal_masses[n.id][0] += float(m_val)
                     nodal_masses[n.id][1] += float(m_val)
                     nodal_masses[n.id][2] += float(m_val)
             elif isinstance(m_val, (list, tuple)):
+                vert_idx = 2 if v_axis == "z" else 1
                 for idx_c in range(min(3, len(m_val))):
-                    if not (ms.lateral_only and idx_c == (1 if is_2d else 2)):
+                    if not (ms.lateral_only and idx_c == vert_idx):
                         nodal_masses[n.id][idx_c] += float(m_val[idx_c])
 
         for e in model.elements:
@@ -195,12 +201,10 @@ def calculate_mass_source(
                 continue
 
             # Gravity force magnitude
-            if is_2d:
-                # 2D frame: gravity along Y
-                f_grav = abs(pl.fy) if pl.fy != 0.0 else math.sqrt(pl.fx**2 + pl.fy**2)
-            else:
-                # 3D frame: gravity along Z
+            if v_axis == "z":
                 f_grav = abs(pl.fz) if pl.fz != 0.0 else math.sqrt(pl.fx**2 + pl.fy**2 + pl.fz**2)
+            else:
+                f_grav = abs(pl.fy) if pl.fy != 0.0 else math.sqrt(pl.fx**2 + pl.fy**2)
 
             if f_grav <= 0.0:
                 continue
@@ -210,30 +214,66 @@ def calculate_mass_source(
             m_equiv = (f_grav * c_scale) / gravity_accel
 
             if ms.lateral_only:
-                nodal_masses[nid][0] += m_equiv
-                if not is_2d:
+                if v_axis == "z":
+                    nodal_masses[nid][0] += m_equiv
                     nodal_masses[nid][1] += m_equiv
+                else:
+                    nodal_masses[nid][0] += m_equiv
+                    if not is_2d:
+                        nodal_masses[nid][2] += m_equiv
             else:
                 nodal_masses[nid][0] += m_equiv
                 nodal_masses[nid][1] += m_equiv
                 nodal_masses[nid][2] += m_equiv
 
-        # 4b. Distributed element loads
+        # 4b. Distributed element loads (member self-weight is already counted by include_element_mass)
         for dl in lc.element_loads:
             eid = dl.element_id
             if eid not in element_masses:
                 continue
-
-            if is_2d:
-                w_grav = abs(dl.wy) if dl.wy != 0.0 else math.sqrt(dl.wx**2 + dl.wy**2)
-            else:
-                w_grav = abs(dl.wz) if dl.wz != 0.0 else math.sqrt(dl.wx**2 + dl.wy**2 + dl.wz**2)
-
-            if w_grav <= 0.0:
+            if ms.include_element_mass and dl.is_self_weight:
                 continue
 
-            w_equiv = (w_grav * c_scale) / gravity_accel
+            if v_axis == "z":
+                w1 = abs(dl.wz) if dl.wz != 0.0 else math.sqrt(dl.wx**2 + dl.wy**2 + dl.wz**2)
+                wz_e = dl.wz_end if dl.wz_end is not None else dl.wz
+                wx_e = dl.wx_end if dl.wx_end is not None else dl.wx
+                wy_e = dl.wy_end if dl.wy_end is not None else dl.wy
+                w2 = abs(wz_e) if wz_e != 0.0 else math.sqrt(wx_e**2 + wy_e**2 + wz_e**2)
+            else:
+                w1 = abs(dl.wy) if dl.wy != 0.0 else math.sqrt(dl.wx**2 + dl.wy**2)
+                wy_e = dl.wy_end if dl.wy_end is not None else dl.wy
+                wx_e = dl.wx_end if dl.wx_end is not None else dl.wx
+                w2 = abs(wy_e) if wy_e != 0.0 else math.sqrt(wx_e**2 + wy_e**2)
+
+            avg_w = 0.5 * (w1 + w2)
+            span_frac = getattr(dl, "end", 1.0) - getattr(dl, "start", 0.0)
+            if avg_w <= 0.0 or span_frac <= 0.0:
+                continue
+
+            w_equiv = (avg_w * span_frac * c_scale) / gravity_accel
             element_masses[eid] += w_equiv
+
+        # 4b-2. Element point loads
+        for epl in getattr(lc, "element_point_loads", []):
+            eid = epl.element_id
+            if eid not in element_masses:
+                continue
+            if v_axis == "z":
+                f_grav = abs(epl.fz) if epl.fz != 0.0 else math.sqrt(epl.fx**2 + epl.fy**2 + epl.fz**2)
+            else:
+                f_grav = abs(epl.fy) if epl.fy != 0.0 else math.sqrt(epl.fx**2 + epl.fy**2)
+            if f_grav <= 0.0:
+                continue
+            el_obj = next((e for e in model.elements if e.id == eid), None)
+            if not el_obj or el_obj.start_node not in nodes_map or el_obj.end_node not in nodes_map:
+                continue
+            ni, nj = nodes_map[el_obj.start_node], nodes_map[el_obj.end_node]
+            L = math.dist((ni.x, ni.y, getattr(ni, "z", 0.0)), (nj.x, nj.y, getattr(nj, "z", 0.0)))
+            if L <= 1e-12:
+                continue
+            m_equiv = (f_grav * c_scale) / gravity_accel
+            element_masses[eid] += m_equiv / L
 
         # 4c. Area loads (projected to bounding nodes or elevation)
         for al in getattr(lc, "area_loads", []):
@@ -257,9 +297,13 @@ def calculate_mass_source(
                     m_per_node = (tot_force * c_scale) / (len(pts) * gravity_accel)
                     for pt in pts:
                         if ms.lateral_only:
-                            nodal_masses[pt.id][0] += m_per_node
-                            if not is_2d:
+                            if v_axis == "z":
+                                nodal_masses[pt.id][0] += m_per_node
                                 nodal_masses[pt.id][1] += m_per_node
+                            else:
+                                nodal_masses[pt.id][0] += m_per_node
+                                if not is_2d:
+                                    nodal_masses[pt.id][2] += m_per_node
                         else:
                             nodal_masses[pt.id][0] += m_per_node
                             nodal_masses[pt.id][1] += m_per_node
@@ -302,24 +346,17 @@ def calculate_mass_source(
         e_extra_m = element_masses.get(e.id, 0.0)
         e_self_m = 0.0
 
-        if ms.include_element_mass:
-            mat = materials_map.get(getattr(e, "material_id", None))
-            sec = sections_map.get(getattr(e, "section_id", None))
-            if mat and sec:
-                area = calculate_section_area(sec)
-                unit_weight = getattr(mat, "unit_weight", None)
-                if unit_weight is not None and float(unit_weight) > 0.0:
-                    # w_self = unit_weight * area -> m_self = w_self / g
-                    e_self_m = (float(unit_weight) * area) / gravity_accel
-                else:
-                    rho = getattr(mat, "rho", None)
-                    if rho is not None and float(rho) > 0.0:
-                        rho_dyn = float(rho) * active_units.consistent_mass_factor
-                        e_self_m = rho_dyn * area
-                    else:
-                        from struct_core import conversion_factor
-                        concrete_uw = 24.0 * conversion_factor("kN, m", active_units, "weight_density")
-                        e_self_m = (concrete_uw * area) / gravity_accel
+        if ms.include_element_mass and str(getattr(e, "type", "")).lower() != "spring":
+            sec_id = getattr(e, "section_id", None)
+            sec = sections_map.get(sec_id)
+            if sec is None:
+                raise ValueError(f"Element {e.id!r} references missing section {sec_id!r}.")
+            mat_id = getattr(sec, "material_id", None)
+            mat = materials_map.get(mat_id)  # the section owns the material
+            if mat is None:
+                raise ValueError(f"Section {sec.id!r} on element {e.id!r} references missing material {mat_id!r}.")
+            area = calculate_section_area(sec)
+            e_self_m = material_weight_density(mat, active_units) * area / gravity_accel
 
         total_elem_m = (e_self_m + e_extra_m) * L
         mid_x = 0.5 * (n_i.x + n_j.x)
@@ -352,7 +389,7 @@ def calculate_mass_source(
 
         for nid, m_vec in nodal_masses.items():
             nd = nodes_map[nid]
-            z_coord = getattr(nd, "z", nd.y if is_2d else 0.0)
+            z_coord = getattr(nd, "z", 0.0) if v_axis == "z" else nd.y
             closest_elev = min(story_elevations, key=lambda el: abs(el - z_coord))
             m_eff = m_vec[0] if ms.lateral_only else max(m_vec)
             story_masses[closest_elev] += m_eff
@@ -362,8 +399,8 @@ def calculate_mass_source(
                 continue
             n_i = nodes_map[e.start_node]
             n_j = nodes_map[e.end_node]
-            z_i = getattr(n_i, "z", n_i.y if is_2d else 0.0)
-            z_j = getattr(n_j, "z", n_j.y if is_2d else 0.0)
+            z_i = getattr(n_i, "z", 0.0) if v_axis == "z" else n_i.y
+            z_j = getattr(n_j, "z", 0.0) if v_axis == "z" else n_j.y
             L = math.sqrt(
                 (n_j.x - n_i.x) ** 2
                 + (n_j.y - n_i.y) ** 2
@@ -374,23 +411,17 @@ def calculate_mass_source(
 
             e_extra_m = element_masses.get(e.id, 0.0)
             e_self_m = 0.0
-            if ms.include_element_mass:
-                mat = materials_map.get(getattr(e, "material_id", None))
-                sec = sections_map.get(getattr(e, "section_id", None))
-                if mat and sec:
-                    area = calculate_section_area(sec)
-                    unit_weight = getattr(mat, "unit_weight", None)
-                    if unit_weight is not None and float(unit_weight) > 0.0:
-                        e_self_m = (float(unit_weight) * area) / gravity_accel
-                    else:
-                        rho = getattr(mat, "rho", None)
-                        if rho is not None and float(rho) > 0.0:
-                            rho_dyn = float(rho) * active_units.consistent_mass_factor
-                            e_self_m = rho_dyn * area
-                        else:
-                            from struct_core import conversion_factor
-                            concrete_uw = 24.0 * conversion_factor("kN, m", active_units, "weight_density")
-                            e_self_m = (concrete_uw * area) / gravity_accel
+            if ms.include_element_mass and str(getattr(e, "type", "")).lower() != "spring":
+                sec_id = getattr(e, "section_id", None)
+                sec = sections_map.get(sec_id)
+                if sec is None:
+                    raise ValueError(f"Element {e.id!r} references missing section {sec_id!r}.")
+                mat_id = getattr(sec, "material_id", None)
+                mat = materials_map.get(mat_id)  # the section owns the material
+                if mat is None:
+                    raise ValueError(f"Section {sec.id!r} on element {e.id!r} references missing material {mat_id!r}.")
+                area = calculate_section_area(sec)
+                e_self_m = material_weight_density(mat, active_units) * area / gravity_accel
 
             total_elem_m = (e_self_m + e_extra_m) * L
             if abs(z_i - z_j) < 1e-4:
@@ -418,3 +449,184 @@ def calculate_mass_source(
         mass_source=ms,
         gravity_accel=gravity_accel,
     )
+
+
+def create_asce7_mass_source(
+    model: Optional[Union[StructuralModel, Project]] = None,
+    dead_load_case_ids: Optional[List[str]] = None,
+    storage_live_case_ids: Optional[List[str]] = None,
+    general_live_case_ids: Optional[List[str]] = None,
+    include_general_live: bool = False,
+    general_live_factor: float = 0.0,
+    snow_load_case_ids: Optional[List[str]] = None,
+    flat_roof_snow_pressure: float = 0.0,
+    partition_load_case_ids: Optional[List[str]] = None,
+    equipment_case_ids: Optional[List[str]] = None,
+    roof_garden_case_ids: Optional[List[str]] = None,
+    include_element_mass: bool = True,
+    include_added_mass: bool = True,
+    lateral_only: bool = False,
+    units: Optional[Union[str, Units, dict]] = None,
+    source_id: str = "MS_ASCE7",
+    name: str = "ASCE 7-22 Effective Seismic Weight",
+) -> MassSource:
+    """
+    Construct a code-compliant MassSource per ASCE 7-22 Section 12.7.2.
+
+    Parameters & Load Factors per ASCE 7-22 Section 12.7.2:
+    ------------------------------------------------------
+    1. Dead Load (structural self-weight & superimposed dead):
+       - Factor: 1.0 (Section 12.7.2)
+    2. Storage Live Load (areas used for storage):
+       - Factor: 0.25 minimum (Section 12.7.2 Item 1)
+       - Note: Per Section 12.7.2 Exception (b), public garages and open parking structures
+         need not be included (factor = 0.0).
+    3. General Floor Live Load (offices, residential, retail, classrooms, etc.):
+       - Factor: 0.0 (Excluded per Section 12.7.2 unless explicitly requested via
+         `include_general_live=True` or `general_live_factor`).
+    4. Partitions:
+       - Factor: 1.0 (Section 12.7.2 Item 2: actual partition weight or minimum
+         10 psf / 0.48 kN/m^2 of floor area).
+    5. Permanent Equipment:
+       - Factor: 1.0 (Section 12.7.2 Item 3: total operating weight).
+    6. Snow Load:
+       - Factor: 0.15 if flat roof snow load Pf > 45 psf (2.16 kN/m^2) (Section 12.7.2 Item 4).
+       - Factor: 0.0 if Pf <= 45 psf (2.16 kN/m^2).
+    7. Roof Gardens & Landscaping:
+       - Factor: 1.0 (Section 12.7.2 Item 5 per Section 3.1.4).
+
+    Parameters
+    ----------
+    model : StructuralModel or Project, optional
+        Structural model to auto-detect load cases from if specific case lists are omitted.
+    dead_load_case_ids : List[str], optional
+        List of load case IDs representing Dead loads (factor = 1.0).
+    storage_live_case_ids : List[str], optional
+        List of load case IDs representing Storage live loads (factor = 0.25).
+    general_live_case_ids : List[str], optional
+        List of load case IDs representing General (non-storage) live loads (factor = 0.0).
+    include_general_live : bool, default=False
+        Whether to include non-storage live loads in seismic weight.
+    general_live_factor : float, default=0.0
+        Factor for general live load if include_general_live is True.
+    snow_load_case_ids : List[str], optional
+        List of load case IDs representing Snow loads.
+    flat_roof_snow_pressure : float, default=0.0
+        Flat roof snow load Pf in active pressure units (e.g. kN/m^2 or psf).
+        If Pf > 2.16 kN/m^2 (45 psf), a factor of 0.15 is applied; otherwise 0.0.
+    partition_load_case_ids : List[str], optional
+        List of load case IDs representing partition loads (factor = 1.0).
+    equipment_case_ids : List[str], optional
+        List of load case IDs representing permanent equipment (factor = 1.0).
+    roof_garden_case_ids : List[str], optional
+        List of load case IDs representing roof gardens / landscaping (factor = 1.0).
+    include_element_mass : bool, default=True
+        Whether to calculate element inertial self-mass from geometry and density.
+    include_added_mass : bool, default=True
+        Whether to include user-assigned lumped nodal and element masses.
+    lateral_only : bool, default=False
+        Whether dynamic mass participates only in lateral degrees of freedom.
+    units : str, Units, or dict, optional
+        Active units specification.
+    source_id : str, default="MS_ASCE7"
+        Identifier for the MassSource instance.
+    name : str, default="ASCE 7-22 Effective Seismic Weight"
+        Human-readable description.
+
+    Returns
+    -------
+    MassSource
+        Configured MassSource object.
+    """
+    raw_model = model.model if isinstance(model, Project) else model
+    load_cases = getattr(raw_model, "load_cases", []) if raw_model is not None else []
+    all_case_ids = [lc.id for lc in load_cases]
+
+    # Auto-detection if model is provided and explicit lists are omitted
+    if raw_model is not None:
+        if dead_load_case_ids is None:
+            dead_load_case_ids = [
+                cid for cid in all_case_ids
+                if any(k in str(cid).lower() for k in ("dead", "sw", "sdl"))
+            ]
+        if storage_live_case_ids is None:
+            storage_live_case_ids = [
+                cid for cid in all_case_ids
+                if any(k in str(cid).lower() for k in ("storage", "stor"))
+            ]
+        if general_live_case_ids is None:
+            storage_set = set(storage_live_case_ids or [])
+            general_live_case_ids = [
+                cid for cid in all_case_ids
+                if any(k in str(cid).lower() for k in ("live", "ll"))
+                and cid not in storage_set
+                and not any(k in str(cid).lower() for k in ("roof", "lr", "storage", "stor"))
+            ]
+        if partition_load_case_ids is None:
+            partition_load_case_ids = [
+                cid for cid in all_case_ids
+                if any(k in str(cid).lower() for k in ("partition", "part"))
+            ]
+        if snow_load_case_ids is None:
+            snow_load_case_ids = [
+                cid for cid in all_case_ids
+                if any(k in str(cid).lower() for k in ("snow",))
+            ]
+        if equipment_case_ids is None:
+            equipment_case_ids = [
+                cid for cid in all_case_ids
+                if any(k in str(cid).lower() for k in ("equip", "mep"))
+            ]
+        if roof_garden_case_ids is None:
+            roof_garden_case_ids = [
+                cid for cid in all_case_ids
+                if any(k in str(cid).lower() for k in ("garden", "landscap"))
+            ]
+
+    # Resolve unit threshold for snow load (ASCE 7-22 Sec 12.7.2 Item 4: 45 psf / 2.16 kN/m^2)
+    active_units = parse_units(units or getattr(getattr(raw_model, "metadata", None), "units", None) or getattr(raw_model, "units", None) or "kN, m")
+    threshold_pressure = 2.16 * conversion_factor("kN, m", active_units, "pressure")
+    snow_factor = 0.15 if flat_roof_snow_pressure > (threshold_pressure - 1e-6) else 0.0
+
+    factors: List[MassSourceFactor] = []
+
+    # 1. Dead load: 1.0
+    for cid in (dead_load_case_ids or []):
+        factors.append(MassSourceFactor(load_case_id=cid, factor=1.0))
+
+    # 2. Storage live load: 0.25 (ASCE 7-22 Section 12.7.2 Item 1)
+    for cid in (storage_live_case_ids or []):
+        factors.append(MassSourceFactor(load_case_id=cid, factor=0.25))
+
+    # 3. Partitions: 1.0 (ASCE 7-22 Section 12.7.2 Item 2)
+    for cid in (partition_load_case_ids or []):
+        factors.append(MassSourceFactor(load_case_id=cid, factor=1.0))
+
+    # 4. Permanent equipment: 1.0 (ASCE 7-22 Section 12.7.2 Item 3)
+    for cid in (equipment_case_ids or []):
+        factors.append(MassSourceFactor(load_case_id=cid, factor=1.0))
+
+    # 5. Snow: 0.15 if Pf > 45 psf (2.16 kN/m^2), else 0.0 (ASCE 7-22 Section 12.7.2 Item 4)
+    if snow_factor > 0.0:
+        for cid in (snow_load_case_ids or []):
+            factors.append(MassSourceFactor(load_case_id=cid, factor=snow_factor))
+
+    # 6. Roof garden / landscaping: 1.0 (ASCE 7-22 Section 12.7.2 Item 5)
+    for cid in (roof_garden_case_ids or []):
+        factors.append(MassSourceFactor(load_case_id=cid, factor=1.0))
+
+    # 7. General live load: 0.0 unless explicitly requested
+    gen_factor = general_live_factor if include_general_live else 0.0
+    if gen_factor > 0.0:
+        for cid in (general_live_case_ids or []):
+            factors.append(MassSourceFactor(load_case_id=cid, factor=gen_factor))
+
+    return MassSource(
+        id=source_id,
+        name=name,
+        factors=factors,
+        include_element_mass=include_element_mass,
+        include_added_mass=include_added_mass,
+        lateral_only=lateral_only,
+    )
+

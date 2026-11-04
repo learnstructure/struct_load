@@ -29,19 +29,21 @@ class SeismicParameters:
         Design spectral response acceleration at short periods, SDS (g), per Sec 11.4.5.
     sd1 : float
         Design spectral response acceleration at 1-sec period, SD1 (g), per Sec 11.4.5.
-    r_factor : float, default=8.0
-        Response modification coefficient R (Table 12.2-1, e.g. 8.0 for RC SMF).
-    importance_factor : float, default=1.0
-        Seismic importance factor I_e per Sec 11.5.1 (Risk Cat I/II: 1.0, III: 1.25, IV: 1.5).
-    tl : float, default=8.0
-        Long-period transition period TL (s) per Sec 11.4.6.
+    r_factor : float, optional
+        Response modification coefficient R; by default that of ``system_type`` in Table 12.2-1 (8.0 for RC SMF).
+    importance_factor : float, optional
+        Seismic importance factor I_e; by default that of ``risk_category`` in Table 1.5-2 (I/II: 1.0, III: 1.25,
+        IV: 1.5).
+    tl : float, optional
+        Long-period transition period TL (s) per Sec 11.4.6 (a mapped site value). It only matters for periods above
+        4 s, the smallest mapped TL; a period beyond that without TL raises ValueError.
     s1 : float, optional
         Mapped MCE_R spectral response acceleration parameter at 1-sec period S1 (g)
         per Sec 11.4.2 or 11.4.4. Used for Eq. (12.8-7) when S1 >= 0.6.
     system_type : str, default='rc_smf'
         Structural system type from Table 12.8-2:
         - 'steel_smf': Steel moment-resisting frame (Ct=0.028 / 0.0724, x=0.8)
-        - 'rc_smf': Concrete moment-resisting frame (Ct=0.016 / 0.0466, x=0.9)
+        - 'rc_smf' / 'rc_imf' / 'rc_omf': Concrete moment-resisting frame (Ct=0.016 / 0.0466, x=0.9)
         - 'steel_ebf': Steel eccentrically braced frame (Ct=0.030 / 0.0731, x=0.75)
         - 'steel_brbf': Steel buckling-restrained braced frame (Ct=0.030 / 0.0731, x=0.75)
         - 'all_other' / 'rc_shear_wall': All other systems (Ct=0.020 / 0.0488, x=0.75)
@@ -55,7 +57,7 @@ class SeismicParameters:
         - 2: Method 2 (Eq. 12.8-3 to 12.8-5) using SDS and SD1 parameters.
     sa_spectrum : callable or dict, optional
         Multi-period response spectrum Sa(T) for Method 1. Can be a callable f(T) -> Sa
-        or a dictionary {period: Sa}. If None for Method 1, standard Sec 11.4.5 spectrum is used.
+        or a dictionary {period: Sa}. Required for Method 1.
     apply_sds_cap : bool, default=False
         Whether to evaluate and apply the Sec 12.8.1.3 cap on SDS (max(1.0, 0.70*SDS)).
     has_irregularities : bool, default=False
@@ -68,20 +70,55 @@ class SeismicParameters:
     """
     sds: float
     sd1: float
-    tl: float = 8.0
-    site_class: str = "D"
+    site_class: str
+    risk_category: str
+    system_type: Optional[str] = None
+    tl: Optional[float] = None
     damping_ratio: float = 0.05
-    r_factor: float = 8.0
-    importance_factor: float = 1.0
+    r_factor: Optional[float] = None
+    importance_factor: Optional[float] = None
     s1: Optional[float] = None
-    system_type: str = "rc_smf"
-    risk_category: str = "II"
     method: int = 2
     sa_spectrum: Optional[Union[Callable[[float], float], Dict[float, float]]] = None
     apply_sds_cap: bool = False
     has_irregularities: bool = False
     redundancy_factor: float = 1.0
     num_stories: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.r_factor is None:
+            if not self.system_type:
+                raise ValueError("system_type is required when r_factor is not given.")
+            self.r_factor = seismic_system_coefficients(self.system_type)[0]
+        if self.importance_factor is None:
+            self.importance_factor = seismic_importance_factor(self.risk_category)
+
+    def long_period_transition(self, period: float) -> float:
+        """TL for a response at ``period`` (s). Without a given TL, periods up to the smallest mapped TL (4 s,
+        ASCE 7-22 Sec 11.4.6 maps) lie below every possible TL; a longer period needs the site's TL."""
+        if self.tl is not None:
+            return self.tl
+        if period > MIN_MAPPED_TL:
+            raise ValueError(
+                f"The long-period transition period TL (Sec 11.4.6) is needed for T = {period:.2f} s > "
+                f"{MIN_MAPPED_TL:g} s; give the site's mapped TL."
+            )
+        return MIN_MAPPED_TL
+
+
+# Smallest long-period transition period TL on the ASCE 7-22 maps (s)
+MIN_MAPPED_TL = 4.0
+
+# Seismic importance factor Ie by Risk Category (ASCE 7-22 Table 1.5-2)
+IMPORTANCE_FACTORS: Dict[str, float] = {"I": 1.0, "II": 1.0, "III": 1.25, "IV": 1.5}
+
+
+def seismic_importance_factor(risk_category: str) -> float:
+    """Seismic importance factor Ie of a Risk Category (ASCE 7-22 Table 1.5-2)."""
+    key = str(risk_category).strip().upper()
+    if key not in IMPORTANCE_FACTORS:
+        raise ValueError(f"Unknown Risk Category '{risk_category}'; use one of {list(IMPORTANCE_FACTORS)}.")
+    return IMPORTANCE_FACTORS[key]
 
 
 @dataclass
@@ -134,6 +171,7 @@ class StoryForceResult:
     sds_used: Optional[float] = None
     method_used: Optional[int] = None
     is_sds_capped: Optional[bool] = None
+    s1_bound_evaluated: bool = True  # False when S1 was not given, so Eq. (12.8-7) could not be checked
 
 
 def get_cu_coefficient(sd1: float) -> float:
@@ -246,8 +284,9 @@ def calculate_cw(
 
 def approximate_fundamental_period(
     total_height: float,
+    *,
+    units: Union[str, Any, dict],
     system_type: str = "rc_smf",
-    units: Union[str, Any, dict] = "kN, m",
     num_stories: Optional[int] = None,
     use_story_count_formula: bool = False,
     cw: Optional[float] = None,
@@ -264,7 +303,7 @@ def approximate_fundamental_period(
         Building height from base to highest level in active length units.
     system_type : str
         Structural system type from Table 12.8-2:
-        - 'rc_smf' / 'concrete_moment': Concrete moment-resisting frame
+        - 'rc_smf' / 'rc_imf' / 'rc_omf' / 'concrete_moment': Concrete moment-resisting frame
         - 'steel_smf' / 'steel_moment': Steel moment-resisting frame
         - 'steel_ebf' / 'eccentrically': Steel eccentrically braced frame
         - 'steel_brbf' / 'buckling': Steel buckling-restrained braced frame
@@ -287,31 +326,39 @@ def approximate_fundamental_period(
     from struct_core import parse_units, conversion_factor, Units
     active_units = parse_units(units)
     is_us = active_units.length in ("in", "ft")
-    sys = system_type.lower()
+    sys = (system_type or "all_other").lower()
 
     target_length = "ft" if is_us else "m"
     hn = total_height * conversion_factor(active_units, Units(force="kN", length=target_length), "length")
 
-    # Alternative 1 (Eq. 12.8-9): Ta = 0.1 N
-    if use_story_count_formula and num_stories is not None and num_stories <= 12:
-        avg_h = hn / num_stories
+    # Alternative 1 (Eq. 12.8-9): Ta = 0.1 N, only for concrete or steel moment frames of at most
+    # 12 stories with an average story height of at least 10 ft (3 m)
+    if use_story_count_formula:
         min_avg_h = 10.0 if is_us else 3.0
-        if avg_h >= min_avg_h:
-            return round(0.1 * num_stories, 3)
+        moment_frame = any(tag in sys for tag in ("smf", "imf", "omf", "moment"))
+        if not moment_frame or num_stories is None or num_stories > 12 or hn / num_stories < min_avg_h:
+            raise ValueError(
+                "Eq. 12.8-9 (Ta = 0.1 N) applies only to concrete or steel moment frames of at most 12 stories "
+                f"with an average story height of at least {min_avg_h:g} {target_length} "
+                f"(system '{system_type}', N = {num_stories}, hn = {hn:.2f} {target_length})."
+            )
+        return round(0.1 * num_stories, 3)
 
     # Alternative 2 (Eq. 12.8-10): Ta = (Cq / sqrt(Cw)) * hn
     if cw is not None and cw > 0.0:
         max_h = 120.0 if is_us else 36.6
         if hn <= max_h:
+            # Printed ASCE 7-22 values. The SI value is not the converted US one (0.0019 s/ft = 0.0062 s/m),
+            # so SI shear-wall periods are about 10x shorter than US ones: an erratum candidate.
             cq = 0.0019 if is_us else 0.00058  # ASCE 7-22 Section 12.8.2.1
             ta_cw = (cq / math.sqrt(cw)) * hn
             return round(ta_cw, 3)
 
     # General Equation (Eq. 12.8-8): Ta = Ct * hn^x (Table 12.8-2)
-    if "steel_smf" in sys or "steel_moment" in sys:
+    if any(tag in sys for tag in ("steel_smf", "steel_imf", "steel_omf", "steel_moment")):
         ct = 0.028 if is_us else 0.0724
         x = 0.8
-    elif "rc_smf" in sys or "concrete_moment" in sys:
+    elif any(tag in sys for tag in ("rc_smf", "rc_imf", "rc_omf", "concrete_moment")):
         ct = 0.016 if is_us else 0.0466
         x = 0.9
     elif "steel_ebf" in sys or "eccentrically" in sys:
@@ -365,7 +412,7 @@ def _eval_single_sa(
         val = sds_eff * (0.4 + 0.6 * (period / t0)) if t0 > 0.0 else sds_eff
     elif period <= ts:
         val = sds_eff
-    elif period <= params.tl:
+    elif period <= params.long_period_transition(period):
         val = params.sd1 / period if period > 0.0 else sds_eff
     else:
         val = (params.sd1 * params.tl) / (period ** 2) if period > 0.0 else sds_eff
@@ -432,7 +479,8 @@ def calculate_design_response_spectrum(
     num_points : int, default=150
         Number of period samples if periods is not specified.
     max_period : float, optional
-        Upper bound on period range (seconds). Defaults to max(params.tl + 2.0, 10.0).
+        Upper bound on period range (seconds). Defaults to max(params.tl + 2.0, 10.0), or the smallest mapped TL
+        (4 s) when TL is not given.
     num_stories : int, optional
         Number of stories (for Sec 12.8.1.3 SDS cap check).
 
@@ -462,9 +510,9 @@ def calculate_design_response_spectrum(
     if periods is not None:
         t_vals = [float(t) for t in periods]
     else:
-        t_max = max_period if max_period is not None else max(tl + 2.0, 10.0)
+        t_max = max_period if max_period is not None else (max(tl + 2.0, 10.0) if tl is not None else MIN_MAPPED_TL)
         # Create critical points
-        crit_pts = {0.0, 0.01, t0, ts, tl, t_max}
+        crit_pts = {0.0, 0.01, t0, ts, t_max} | ({tl} if tl is not None else set())
         linear_pts = list(math.pow(10, x) for x in (-2 + i * (math.log10(t_max) + 2) / num_points for i in range(num_points + 1)))
         all_pts = sorted(crit_pts.union(linear_pts))
         t_vals = [p for p in all_pts if 0.0 <= p <= t_max]
@@ -476,7 +524,7 @@ def calculate_design_response_spectrum(
         "sa": sa_vals,
         "t0": round(t0, 4),
         "ts": round(ts, 4),
-        "tl": round(tl, 4),
+        "tl": round(tl, 4) if tl is not None else None,
         "sds": round(sds_eff, 4),
         "sd1": round(params.sd1, 4),
         "site_class": params.site_class,
@@ -523,41 +571,24 @@ def calculate_seismic_response_coefficient(
     # Method Selection: 1 or 2
     method_val = int(params.method) if isinstance(params.method, (int, str)) and str(params.method).isdigit() else 2
     if method_val == 1:
-        # Method 1 (Eq. 12.8-2): Cs = Sa / (R / Ie)
-        if params.sa_spectrum is not None:
-            if callable(params.sa_spectrum):
-                sa = float(params.sa_spectrum(period))
-            elif isinstance(params.sa_spectrum, dict):
-                t_keys = sorted(params.sa_spectrum.keys())
-                if period <= t_keys[0]:
-                    sa = float(params.sa_spectrum[t_keys[0]])
-                elif period >= t_keys[-1]:
-                    sa = float(params.sa_spectrum[t_keys[-1]])
-                else:
-                    for i in range(len(t_keys) - 1):
-                        t_lo, t_hi = t_keys[i], t_keys[i + 1]
-                        if t_lo <= period <= t_hi:
-                            sa_lo, sa_hi = params.sa_spectrum[t_lo], params.sa_spectrum[t_hi]
-                            sa = float(sa_lo + (period - t_lo) / (t_hi - t_lo) * (sa_hi - sa_lo))
-                            break
-            else:
-                sa = sds_effective
-        else:
-            # Standard Section 11.4.5 design spectrum
-            ts = params.sd1 / sds_effective if sds_effective > 0.0 else 0.0
-            if period <= ts:
-                sa = sds_effective
-            elif period <= params.tl:
-                sa = params.sd1 / period
-            else:
-                sa = (params.sd1 * params.tl) / (period ** 2)
+        # Method 1 (Eq. 12.8-2): Cs = Sa / (R / Ie), Sa from the multi-period spectrum of Sec 11.4.5.1
+        if params.sa_spectrum is None:
+            raise ValueError(
+                "Method 1 (ASCE 7-22 Eq. 12.8-2) uses the multi-period design spectrum of Section 11.4.5.1; "
+                "supply sa_spectrum or use Method 2."
+            )
+        sa = _eval_single_sa(params, period, num_stories=num_stories)
 
         # ASCE 7-22 Section 12.8.1.1 Exception:
         # "Where Equation (12.8-2) is used and the period T is less than the period at which
         # Sa is maximum, the maximum value of Sa shall be used."
-        ts = params.sd1 / sds_effective if sds_effective > 0.0 else 0.0
-        if period < ts:
-            sa = max(sa, sds_effective)
+        if isinstance(params.sa_spectrum, dict):
+            t_peak, sa_peak = max(params.sa_spectrum.items(), key=lambda kv: kv[1])
+        else:
+            samples = [0.01 * i for i in range(int(100 * max(params.tl or MIN_MAPPED_TL, period)) + 1)]
+            t_peak, sa_peak = max(((t, float(params.sa_spectrum(t))) for t in samples), key=lambda kv: kv[1])
+        if period < t_peak:
+            sa = max(sa, float(sa_peak))
 
         cs_calc = sa / r_ie
 
@@ -568,7 +599,7 @@ def calculate_seismic_response_coefficient(
         # Upper bounds:
         # For T <= TL: Eq. (12.8-4) Cs = SD1 / (T * (R / Ie))
         # For T > TL:  Eq. (12.8-5) Cs = (SD1 * TL) / (T^2 * (R / Ie))
-        if period <= params.tl:
+        if period <= params.long_period_transition(period):
             cs_max = params.sd1 / (period * r_ie)
         else:
             cs_max = (params.sd1 * params.tl) / ((period ** 2) * r_ie)
@@ -579,10 +610,10 @@ def calculate_seismic_response_coefficient(
     # Eq. (12.8-6): Cs >= max(0.044 * SDS * Ie, 0.01)
     cs_min_general = max(0.044 * sds_effective * params.importance_factor, 0.01)
 
-    # Eq. (12.8-7): For structures where S1 >= 0.6g: Cs >= 0.5 * S1 / (R / Ie)
-    s1_check = params.s1 if params.s1 is not None else params.sd1
-    if s1_check >= 0.6:
-        cs_min_s1 = 0.5 * s1_check / r_ie
+    # Eq. (12.8-7): For structures where S1 >= 0.6g: Cs >= 0.5 * S1 / (R / Ie). S1 is mapped site
+    # data; without it the bound is not evaluated (see StoryForceResult.s1_bound_evaluated).
+    if params.s1 is not None and params.s1 >= 0.6:
+        cs_min_s1 = 0.5 * params.s1 / r_ie
     else:
         cs_min_s1 = 0.0
 
@@ -595,7 +626,8 @@ def calculate_seismic_elf(
     story_elevations: List[float],
     story_weights: List[float],
     params: SeismicParameters,
-    units: Union[str, Any, dict] = "kN, m",
+    *,
+    units: Union[str, Any, dict],
     custom_period: Optional[float] = None,
     use_story_count_formula: bool = False,
     cw: Optional[float] = None,
@@ -727,4 +759,303 @@ def calculate_seismic_elf(
         sds_used=round(sds_effective, 4),
         method_used=params.method,
         is_sds_capped=is_capped,
+        s1_bound_evaluated=params.s1 is not None,
     )
+
+
+def determine_seismic_design_category(
+    sds: float,
+    sd1: float,
+    risk_category: str = "II",
+    s1: Optional[float] = None,
+) -> str:
+    """
+    Determine Seismic Design Category (SDC A through F) per ASCE 7-22 Section 11.6.
+
+    Parameters
+    ----------
+    sds : float
+        Design spectral response acceleration parameter at short periods.
+    sd1 : float
+        Design spectral response acceleration parameter at 1-s period.
+    risk_category : str, default="II"
+        Risk Category ('I', 'II', 'III', or 'IV') per Table 1.5-1.
+    s1 : float, optional
+        Mapped maximum considered earthquake spectral response acceleration at 1-s period.
+
+    Returns
+    -------
+    str
+        Seismic Design Category ('A', 'B', 'C', 'D', 'E', or 'F').
+    """
+    rc = risk_category.strip().upper()
+    if rc not in ("I", "II", "III", "IV"):
+        rc = "II"
+
+    # ASCE 7-22 Section 11.6: S1 >= 0.75 check
+    if s1 is not None and s1 >= 0.75:
+        if rc == "IV":
+            return "F"
+        return "E"
+
+    # Table 11.6-1: SDC Based on Short-Period Response Acceleration SDS
+    if rc == "IV":
+        if sds < 0.167:
+            sdc_sds = "A"
+        elif sds < 0.33:
+            sdc_sds = "C"
+        elif sds < 0.50:
+            sdc_sds = "D"
+        else:
+            sdc_sds = "D"
+    else:  # Risk Categories I, II, III
+        if sds < 0.167:
+            sdc_sds = "A"
+        elif sds < 0.33:
+            sdc_sds = "B"
+        elif sds < 0.50:
+            sdc_sds = "C"
+        else:
+            sdc_sds = "D"
+
+    # Table 11.6-2: SDC Based on 1-s Period Response Acceleration SD1
+    if rc == "IV":
+        if sd1 < 0.067:
+            sdc_sd1 = "A"
+        elif sd1 < 0.133:
+            sdc_sd1 = "C"
+        elif sd1 < 0.20:
+            sdc_sd1 = "D"
+        else:
+            sdc_sd1 = "D"
+    else:  # Risk Categories I, II, III
+        if sd1 < 0.067:
+            sdc_sd1 = "A"
+        elif sd1 < 0.133:
+            sdc_sd1 = "B"
+        elif sd1 < 0.20:
+            sdc_sd1 = "C"
+        else:
+            sdc_sd1 = "D"
+
+    # Governed by the more severe category
+    severity_order = {"A": 1, "B": 2, "C": 3, "D": 4, "E": 5, "F": 6}
+    governing = max(sdc_sds, sdc_sd1, key=lambda c: severity_order.get(c, 0))
+    return governing
+
+
+def calculate_accidental_torsion(
+    fx: float,
+    perpendicular_dimension: float,
+    ax: float = 1.0,
+) -> float:
+    """
+    Calculate accidental torsional moment Mta at a given floor level per ASCE 7-22 Section 12.8.4.2:
+    Mta = Ax * (0.05 * B) * Fx
+
+    Parameters
+    ----------
+    fx : float
+        Seismic design lateral force applied at the story level [kN or kip].
+    perpendicular_dimension : float
+        Building plan dimension perpendicular to the direction of applied force B [m or ft].
+    ax : float, default=1.0
+        Torsional amplification factor Ax (>= 1.0, <= 3.0) per Section 12.8.4.3.
+
+    Returns
+    -------
+    float
+        Accidental torsional moment Mta [kN*m or kip*ft].
+    """
+    ax_eff = min(3.0, max(1.0, float(ax)))
+    eccentricity = 0.05 * abs(perpendicular_dimension)
+    return round(ax_eff * eccentricity * abs(fx), 3)
+
+
+def calculate_torsional_amplification(
+    delta_max: float,
+    delta_avg: float,
+) -> float:
+    """
+    Calculate accidental torsional amplification factor Ax per ASCE 7-22 Section 12.8.4.3 Eq. (12.8-15):
+    Ax = (delta_max / (1.2 * delta_avg))^2, with 1.0 <= Ax <= 3.0.
+
+    Parameters
+    ----------
+    delta_max : float
+        Maximum displacement at level x computed assuming Ax = 1.0 [mm or in].
+    delta_avg : float
+        Average of displacements at extreme points at level x computed assuming Ax = 1.0 [mm or in].
+
+    Returns
+    -------
+    float
+        Torsional amplification factor Ax (between 1.0 and 3.0).
+    """
+    if delta_avg <= 1e-9:
+        return 1.0
+    ratio = delta_max / (1.2 * delta_avg)
+    ax = ratio ** 2
+    ax_clamped = min(3.0, max(1.0, ax))
+    return round(ax_clamped, 3)
+
+
+def calculate_design_story_drift(
+    delta_elastic_top: float,
+    delta_elastic_bot: float,
+    cd: float,
+    importance_factor: float = 1.0,
+) -> float:
+    """
+    Calculate design story drift Delta per ASCE 7-22 Section 12.8.6 Eq. (12.8-16):
+    Delta = (Cd * (delta_top - delta_bot)) / Ie
+
+    Parameters
+    ----------
+    delta_elastic_top : float
+        Elastic displacement at upper story joint [mm or in].
+    delta_elastic_bot : float
+        Elastic displacement at lower story joint [mm or in].
+    cd : float
+        Deflection amplification factor from Table 12.2-1.
+    importance_factor : float, default=1.0
+        Seismic importance factor Ie.
+
+    Returns
+    -------
+    float
+        Design story drift Delta [mm or in].
+    """
+    delta_e = abs(delta_elastic_top - delta_elastic_bot)
+    ie = max(1e-4, importance_factor)
+    return round((cd * delta_e) / ie, 4)
+
+
+def check_story_drift_limit(
+    story_drift: float,
+    story_height: float,
+    risk_category: str = "II",
+    system_type: str = "other",
+) -> Tuple[bool, float, float]:
+    """
+    Check story drift against allowable drift Delta_a per ASCE 7-22 Table 12.12-1.
+
+    Parameters
+    ----------
+    story_drift : float
+        Design story drift Delta [mm or in].
+    story_height : float
+        Story height hsx [mm or in].
+    risk_category : str, default="II"
+        Risk Category ('I', 'II', 'III', or 'IV').
+    system_type : str, default="other"
+        Structural framing type:
+        - 'cantilever': Cantilever column systems
+        - '4_stories_or_less': <= 4 stories designed to accommodate drift
+        - 'other': All other building structures (default)
+
+    Returns
+    -------
+    Tuple[bool, float, float]
+        (is_compliant, story_drift, allowable_drift)
+    """
+    rc = risk_category.strip().upper()
+    sys = system_type.strip().lower()
+
+    if "cantilever" in sys:
+        factor = 0.010 if rc == "IV" else 0.0125
+    elif "4_stories" in sys:
+        if rc == "IV":
+            factor = 0.015
+        elif rc == "III":
+            factor = 0.020
+        else:
+            factor = 0.025
+    else:
+        if rc == "IV":
+            factor = 0.010
+        elif rc == "III":
+            factor = 0.015
+        else:
+            factor = 0.020
+
+    allowable_drift = round(factor * story_height, 4)
+    is_compliant = story_drift <= (allowable_drift + 1e-6)
+    return is_compliant, round(story_drift, 4), allowable_drift
+
+
+
+# ASCE 7-22 Table 12.2-1 (moment-resisting frame and braced frame systems used by the ecosystem):
+# system key -> (R, Omega_0, Cd)
+SEISMIC_SYSTEM_COEFFICIENTS: Dict[str, Tuple[float, float, float]] = {
+    "rc_smf": (8.0, 3.0, 5.5),       # C.5 Special reinforced concrete moment frames
+    "rc_imf": (5.0, 3.0, 4.5),       # C.6 Intermediate reinforced concrete moment frames
+    "rc_omf": (3.0, 3.0, 2.5),       # C.7 Ordinary reinforced concrete moment frames
+    "steel_smf": (8.0, 3.0, 5.5),    # C.1 Steel special moment frames
+    "steel_imf": (4.5, 3.0, 4.0),    # C.3 Steel intermediate moment frames
+    "steel_omf": (3.5, 3.0, 3.0),    # C.4 Steel ordinary moment frames
+    "steel_ebf": (8.0, 2.0, 4.0),    # B.1 Steel eccentrically braced frames
+    "steel_brbf": (8.0, 2.5, 5.0),   # B.26 Steel buckling-restrained braced frames
+}
+
+MOMENT_FRAME_SYSTEMS = ("rc_smf", "rc_imf", "rc_omf", "steel_smf", "steel_imf", "steel_omf")
+
+# System keys accepted by the seismic tools: the Table 12.2-1 subset plus 'all_other' (Table 12.8-2 "all other
+# structural systems", for the approximate period only)
+SEISMIC_SYSTEM_TYPES = (*SEISMIC_SYSTEM_COEFFICIENTS, "all_other")
+
+
+def normalize_system_type(system_type: str) -> str:
+    """Canonical seismic system key (case and surrounding spaces ignored); raises ValueError for any other value."""
+    key = str(system_type).strip().lower()
+    if key not in SEISMIC_SYSTEM_TYPES:
+        raise ValueError(f"Unknown seismic system '{system_type}'; use one of {list(SEISMIC_SYSTEM_TYPES)}.")
+    return key
+
+
+def seismic_system_coefficients(system_type: str) -> Tuple[float, float, float]:
+    """
+    Design coefficients (R, Omega_0, Cd) of a seismic force-resisting system per ASCE 7-22 Table 12.2-1.
+
+    Raises ValueError for systems that are not tabulated here.
+    """
+    key = system_type.strip().lower()
+    if key not in SEISMIC_SYSTEM_COEFFICIENTS:
+        raise ValueError(
+            f"System '{system_type}' is not in the ASCE 7-22 Table 12.2-1 subset; "
+            f"use one of {sorted(SEISMIC_SYSTEM_COEFFICIENTS)}."
+        )
+    return SEISMIC_SYSTEM_COEFFICIENTS[key]
+
+
+def allowable_story_drift(
+    story_height: float,
+    risk_category: str = "II",
+    system_type: str = "rc_smf",
+    seismic_design_category: Optional[str] = None,
+    redundancy_factor: float = 1.0,
+) -> float:
+    """
+    Allowable story drift Delta_a per ASCE 7-22 Table 12.12-1 ("All other structures"), divided by
+    rho for systems solely comprising moment frames in SDC D, E, or F (Section 12.12.1.1).
+    """
+    _, _, delta_a = check_story_drift_limit(0.0, story_height, risk_category=risk_category, system_type="other")
+    sdc = (seismic_design_category or "").strip().upper()
+    if system_type.strip().lower() in MOMENT_FRAME_SYSTEMS and sdc in ("D", "E", "F"):
+        delta_a /= redundancy_factor
+    return delta_a
+
+
+def stability_coefficient(px: float, delta_xe: float, vx: float, story_height: float) -> float:
+    """
+    Stability coefficient per ASCE 7-22 Eq. (12.8-18): theta = Px Delta_xe / (Vx hsx), with the
+    elastic story drift Delta_xe under the seismic design story shear Vx.
+    """
+    if vx <= 0.0 or story_height <= 0.0:
+        raise ValueError("Story shear Vx and story height hsx must be positive.")
+    return px * abs(delta_xe) / (vx * story_height)
+
+
+def max_stability_coefficient(cd: float, beta: float = 1.0) -> float:
+    """theta_max = 0.5 / (beta Cd) <= 0.25 per ASCE 7-22 Eq. (12.8-19), not taken less than 0.10."""
+    return max(min(0.5 / (beta * cd), 0.25), 0.10)

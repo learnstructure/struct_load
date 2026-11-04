@@ -62,13 +62,15 @@ def demo_period_and_cs():
     params = SeismicParameters(
         sds=1.00,
         sd1=0.60,
+        site_class="D",
+        risk_category="II",
         r_factor=8.0,
         importance_factor=1.0,
         tl=8.0,
         system_type="rc_smf",
     )
 
-    ta_rc = approximate_fundamental_period(building_height_m, "rc_smf", "kN, m")
+    ta_rc = approximate_fundamental_period(building_height_m, system_type="rc_smf", units="kN, m")
     cs = calculate_seismic_response_coefficient(params=params, period=ta_rc)
 
     print("\n--- Seismic Design Parameters ---")
@@ -95,6 +97,8 @@ def demo_multi_story_elf_distribution():
     params = SeismicParameters(
         sds=0.85,
         sd1=0.45,
+        site_class="D",
+        risk_category="III",
         r_factor=6.0,          # e.g., Concrete Intermediate Moment Frame
         importance_factor=1.25, # Risk Category III (e.g. assembly/school)
         tl=8.0,
@@ -157,8 +161,8 @@ def demo_model_derived_seismic_weight():
         ])
 
     mat = ElasticMaterial(id="Concrete", E=30e6, nu=0.2, rho=2400.0)
-    sec_col = RectangularSection(id="Col_500x500", b=0.50, h=0.50)
-    sec_bm = RectangularSection(id="Bm_300x500", b=0.30, h=0.50)
+    sec_col = RectangularSection(material_id=mat.id, id="Col_500x500", b=0.50, h=0.50)
+    sec_bm = RectangularSection(material_id=mat.id, id="Bm_300x500", b=0.30, h=0.50)
     model.materials.append(mat)
     model.sections.extend([sec_col, sec_bm])
 
@@ -170,7 +174,7 @@ def demo_model_derived_seismic_weight():
                 BeamElement(
                     id=elem_id, type="beam",
                     start_node=b_offset + i, end_node=t_offset + i,
-                    material_id=mat.id, section_id=sec_col.id
+                    section_id=sec_col.id
                 )
             )
             elem_id += 1
@@ -184,7 +188,7 @@ def demo_model_derived_seismic_weight():
                 BeamElement(
                     id=elem_id, type="beam",
                     start_node=n1, end_node=n2,
-                    material_id=mat.id, section_id=sec_bm.id
+                    section_id=sec_bm.id
                 )
             )
             elem_id += 1
@@ -213,7 +217,7 @@ def demo_model_derived_seismic_weight():
     print(f"  Total Seismic Weight W = {sum(weights):.2f} kN")
 
     # Apply lateral seismic using the generator
-    params = SeismicParameters(sds=1.0, sd1=0.5, r_factor=8.0)
+    params = SeismicParameters(sds=1.0, sd1=0.5, site_class="D", risk_category="II", r_factor=8.0)
     seismic_cases, elf_res = generator.apply_lateral_seismic(
         model_or_project=model,
         params=params,

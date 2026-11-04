@@ -20,6 +20,34 @@ from struct_core import (
 )
 
 
+def material_weight_density(material: object, units: Units) -> float:
+    """
+    Weight per unit volume of ``material`` in ``units``: its ``unit_weight``, else its mass density ``rho`` times
+    gravity. A material with neither has no self-weight to compute: ``ValueError`` names it (no density is assumed).
+    """
+    unit_weight = getattr(material, "unit_weight", None)
+    if unit_weight is not None and float(unit_weight) > 0.0:
+        return float(unit_weight)
+    rho = getattr(material, "rho", None)
+    if rho is not None and float(rho) > 0.0:
+        return float(rho) * units.consistent_mass_factor * units.gravity_acceleration
+    name = getattr(material, "id", None) or type(material).__name__
+    raise ValueError(f"Material {name!r} has no density (unit_weight or rho); its self-weight cannot be computed.")
+
+
+def _solver_weight_density(material: object, gravity_accel: float) -> float:
+    """Weight per unit volume of a fem2d / fem3d material: its ``unit_weight``, else its mass density times gravity.
+    Solver materials hold ``rho`` in consistent units (e.g. t/m3 for kN, m), so no mass-unit factor applies."""
+    unit_weight = getattr(material, "unit_weight", None)
+    if unit_weight is not None and float(unit_weight) > 0.0:
+        return float(unit_weight)
+    rho = getattr(material, "rho", None)
+    if rho is not None and float(rho) > 0.0:
+        return float(rho) * gravity_accel
+    raise ValueError(f"Material {type(material).__name__} has no density (unit_weight or rho); its self-weight cannot "
+                     f"be computed.")
+
+
 def calculate_section_area(section: object) -> float:
     """
     Calculate cross-sectional area A (m² for SI, in² for US) from a section schema.
@@ -70,12 +98,12 @@ def calculate_self_weight(
     # 1. Resolve active Units
     if units is not None:
         active_units = parse_units(units) if isinstance(units, (str, dict)) else units
-    elif hasattr(model, "units") and model.units is not None:
+    elif getattr(model, "units", None) is not None:
         active_units = model.units
     elif getattr(model, "metadata", None) and getattr(model.metadata, "units", None):
         active_units = model.metadata.units
     else:
-        active_units = Units(force="kN", length="m")
+        raise ValueError("Units unknown: pass units= or use a Project")
 
     # 2. Resolve gravity acceleration
     g_accel = gravity_accel if gravity_accel is not None else active_units.gravity_acceleration
@@ -111,28 +139,20 @@ def calculate_self_weight(
         if elem_type not in ("beam", "truss", "column", "frame"):
             continue
 
-        mat = materials_map.get(getattr(elem, "material_id", None))
-        sec = sections_map.get(getattr(elem, "section_id", None))
-        if not mat or not sec:
-            continue
+        sec_id = getattr(elem, "section_id", None)
+        sec = sections_map.get(sec_id)
+        if sec is None:
+            raise ValueError(f"Element {elem.id!r} references missing section {sec_id!r}.")
+        mat_id = getattr(sec, "material_id", None)
+        mat = materials_map.get(mat_id)  # the section owns the material
+        if mat is None:
+            raise ValueError(f"Section {sec.id!r} on element {elem.id!r} references missing material {mat_id!r}.")
 
         area = calculate_section_area(sec)
         if area <= 0.0:
             continue
 
-        # Check explicit unit_weight on material first
-        unit_weight = getattr(mat, "unit_weight", None)
-        if unit_weight is not None and float(unit_weight) > 0.0:
-            w = float(unit_weight) * area
-        else:
-            rho = getattr(mat, "rho", None)
-            if rho is not None and float(rho) > 0.0:
-                rho_dyn = float(rho) * active_units.consistent_mass_factor
-                w = rho_dyn * g_accel * area
-            else:
-                from struct_core import conversion_factor
-                concrete_uw = 24.0 * conversion_factor("kN, m", active_units, "weight_density")
-                w = concrete_uw * area
+        w = material_weight_density(mat, active_units) * area
 
         w_mag = float(w)
         if w_mag <= 0.0:
@@ -205,7 +225,6 @@ def apply_self_weight(
     if hasattr(source, "elements") and hasattr(source, "add_load") and not hasattr(source, "load_cases"):
         active_units = parse_units(units or getattr(source, "units", None) or "kN, m")
         g_accel = gravity_accel if gravity_accel is not None else active_units.gravity_acceleration
-        mass_factor = active_units.consistent_mass_factor
 
         # Detect 2D vs 3D
         is_3d = False
@@ -233,10 +252,11 @@ def apply_self_weight(
             if eid in already_applied_eids or getattr(el, "eid", None) in already_applied_eids:
                 continue
 
-            mat = getattr(el, "material", None)
+            # Springs have no physical section (fem3d: none; fem2d: a unit placeholder section)
             sec = getattr(el, "section", None)
-            if not mat or not sec:
+            if sec is None or type(el).__name__ == "SpringElement":
                 continue
+            mat = sec.material  # the section owns the material
 
             area = getattr(sec, "A", None)
             if area is None or float(area) <= 0.0:
@@ -251,18 +271,7 @@ def apply_self_weight(
             if area <= 0.0:
                 continue
 
-            unit_weight = getattr(mat, "unit_weight", None)
-            if unit_weight is not None and float(unit_weight) > 0.0:
-                w = float(unit_weight) * area
-            else:
-                rho = getattr(mat, "rho", None)
-                if rho is not None and float(rho) > 0.0:
-                    rho_dyn = float(rho) * mass_factor
-                    w = rho_dyn * g_accel * area
-                else:
-                    from struct_core import conversion_factor
-                    concrete_uw = 24.0 * conversion_factor("kN, m", active_units, "weight_density")
-                    w = concrete_uw * area
+            w = _solver_weight_density(mat, g_accel) * area
 
             if is_3d:
                 from fem3d.loads import DistributedLoad as Fem3dDistributedLoad

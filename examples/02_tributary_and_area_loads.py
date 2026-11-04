@@ -123,17 +123,17 @@ def demo_area_load_distribution_on_model():
 
     # Materials and sections
     conc = ElasticMaterial(id="Concrete_C30", E=30e6, nu=0.2, rho=2400.0)
-    sec_col = RectangularSection(id="Col_40x40", b=0.40, h=0.40)
-    sec_bm = RectangularSection(id="Beam_30x50", b=0.30, h=0.50)
+    sec_col = RectangularSection(material_id=conc.id, id="Col_40x40", b=0.40, h=0.40)
+    sec_bm = RectangularSection(material_id=conc.id, id="Beam_30x50", b=0.30, h=0.50)
     model.materials.append(conc)
     model.sections.extend([sec_col, sec_bm])
 
     # Columns
     model.elements.extend([
-        BeamElement(id=1, type="beam", start_node=1, end_node=5, material_id=conc.id, section_id=sec_col.id),
-        BeamElement(id=2, type="beam", start_node=2, end_node=6, material_id=conc.id, section_id=sec_col.id),
-        BeamElement(id=3, type="beam", start_node=3, end_node=7, material_id=conc.id, section_id=sec_col.id),
-        BeamElement(id=4, type="beam", start_node=4, end_node=8, material_id=conc.id, section_id=sec_col.id),
+        BeamElement(id=1, type="beam", start_node=1, end_node=5, section_id=sec_col.id),
+        BeamElement(id=2, type="beam", start_node=2, end_node=6, section_id=sec_col.id),
+        BeamElement(id=3, type="beam", start_node=3, end_node=7, section_id=sec_col.id),
+        BeamElement(id=4, type="beam", start_node=4, end_node=8, section_id=sec_col.id),
     ])
 
     # Perimeter floor beams:
@@ -142,10 +142,10 @@ def demo_area_load_distribution_on_model():
     # E7: (7 -> 8) along X, span = 6m (long beam)
     # E8: (8 -> 5) along Y, span = 4m (short beam)
     model.elements.extend([
-        BeamElement(id=5, type="beam", start_node=5, end_node=6, material_id=conc.id, section_id=sec_bm.id),
-        BeamElement(id=6, type="beam", start_node=6, end_node=7, material_id=conc.id, section_id=sec_bm.id),
-        BeamElement(id=7, type="beam", start_node=7, end_node=8, material_id=conc.id, section_id=sec_bm.id),
-        BeamElement(id=8, type="beam", start_node=8, end_node=5, material_id=conc.id, section_id=sec_bm.id),
+        BeamElement(id=5, type="beam", start_node=5, end_node=6, section_id=sec_bm.id),
+        BeamElement(id=6, type="beam", start_node=6, end_node=7, section_id=sec_bm.id),
+        BeamElement(id=7, type="beam", start_node=7, end_node=8, section_id=sec_bm.id),
+        BeamElement(id=8, type="beam", start_node=8, end_node=5, section_id=sec_bm.id),
     ])
 
     # Define a 2-way AreaLoad over nodes [5, 6, 7, 8] with pressure = 4.0 kPa

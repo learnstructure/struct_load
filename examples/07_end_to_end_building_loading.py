@@ -64,8 +64,8 @@ def build_3story_building_model() -> Project:
 
     # Materials and Cross Sections
     conc = ElasticMaterial(id="Concrete_C30", name="Normalweight Concrete 30 MPa", E=30e6, nu=0.2, rho=2400.0)
-    col_sec = RectangularSection(id="Col_500x500", name="Column 500x500 mm", b=0.50, h=0.50)
-    bm_sec = RectangularSection(id="Bm_300x600", name="Beam 300x600 mm", b=0.30, h=0.60)
+    col_sec = RectangularSection(material_id=conc.id, id="Col_500x500", name="Column 500x500 mm", b=0.50, h=0.50)
+    bm_sec = RectangularSection(material_id=conc.id, id="Bm_300x600", name="Beam 300x600 mm", b=0.30, h=0.60)
     model.materials.append(conc)
     model.sections.extend([col_sec, bm_sec])
 
@@ -80,7 +80,7 @@ def build_3story_building_model() -> Project:
                     BeamElement(
                         id=elem_id, type="beam",
                         start_node=n_bot, end_node=n_top,
-                        material_id=conc.id, section_id=col_sec.id,
+                        section_id=col_sec.id,
                         name=f"Col_Story{iz+1}_{ix}_{iy}",
                     )
                 )
@@ -97,7 +97,7 @@ def build_3story_building_model() -> Project:
                     BeamElement(
                         id=elem_id, type="beam",
                         start_node=n1, end_node=n2,
-                        material_id=conc.id, section_id=bm_sec.id,
+                        section_id=bm_sec.id,
                         name=f"BmX_Lvl{iz}_{ix}_{iy}",
                     )
                 )
@@ -112,7 +112,7 @@ def build_3story_building_model() -> Project:
                     BeamElement(
                         id=elem_id, type="beam",
                         start_node=n1, end_node=n2,
-                        material_id=conc.id, section_id=bm_sec.id,
+                        section_id=bm_sec.id,
                         name=f"BmY_Lvl{iz}_{ix}_{iy}",
                     )
                 )
@@ -186,7 +186,7 @@ def run_pipeline():
     # SDS = 0.90 g, SD1 = 0.45 g, R = 8.0 (Special RC Moment Frame)
     # Derives exact building seismic weight directly from member self-weights and dead load cases!
     print("\n4. Applying Lateral Seismic Loads (ASCE 7 Section 12.8 ELF):")
-    params = SeismicParameters(sds=0.90, sd1=0.45, r_factor=8.0)
+    params = SeismicParameters(sds=0.90, sd1=0.45, site_class="D", risk_category="II", r_factor=8.0)
     seismic_cases, elf_res = generator.apply_lateral_seismic(
         model_or_project=project,
         params=params,

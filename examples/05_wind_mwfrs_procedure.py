@@ -163,17 +163,17 @@ def demo_apply_wind_to_model():
         ])
 
     mat = ElasticMaterial(id="Concrete", E=30e6, nu=0.2, rho=2400.0)
-    sec = RectangularSection(id="Rect_400x500", b=0.40, h=0.50)
+    sec = RectangularSection(material_id=mat.id, id="Rect_400x500", b=0.40, h=0.50)
     model.materials.append(mat)
     model.sections.append(sec)
 
     model.elements.extend([
-        BeamElement(id=1, type="beam", start_node=1, end_node=3, material_id=mat.id, section_id=sec.id),
-        BeamElement(id=2, type="beam", start_node=2, end_node=4, material_id=mat.id, section_id=sec.id),
-        BeamElement(id=3, type="beam", start_node=3, end_node=4, material_id=mat.id, section_id=sec.id),
-        BeamElement(id=4, type="beam", start_node=3, end_node=5, material_id=mat.id, section_id=sec.id),
-        BeamElement(id=5, type="beam", start_node=4, end_node=6, material_id=mat.id, section_id=sec.id),
-        BeamElement(id=6, type="beam", start_node=5, end_node=6, material_id=mat.id, section_id=sec.id),
+        BeamElement(id=1, type="beam", start_node=1, end_node=3, section_id=sec.id),
+        BeamElement(id=2, type="beam", start_node=2, end_node=4, section_id=sec.id),
+        BeamElement(id=3, type="beam", start_node=3, end_node=4, section_id=sec.id),
+        BeamElement(id=4, type="beam", start_node=3, end_node=5, section_id=sec.id),
+        BeamElement(id=5, type="beam", start_node=4, end_node=6, section_id=sec.id),
+        BeamElement(id=6, type="beam", start_node=5, end_node=6, section_id=sec.id),
     ])
 
     generator = LoadGenerator(units="kN, m")

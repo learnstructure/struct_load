@@ -17,7 +17,6 @@ def test_model_derived_seismic_weight():
     dead_case, _ = gen.apply_gravity_loads(
         project,
         occupancy="office",
-        tributary_width=5.0,
         superimposed_dead=1.5,
         include_self_weight=True,
     )
@@ -40,10 +39,10 @@ def test_apply_lateral_seismic_3d_both_directions():
     gen = LoadGenerator(units="kN, m")
 
     # Apply gravity loads first
-    gen.apply_gravity_loads(project, include_self_weight=True)
+    gen.apply_gravity_loads(project, occupancy="office", superimposed_dead=1.5, include_self_weight=True)
 
     # Apply seismic loads in both directions
-    params = SeismicParameters(sds=0.75, sd1=0.40, r_factor=8.0)
+    params = SeismicParameters(sds=0.75, sd1=0.40, site_class="D", risk_category="II", r_factor=8.0, system_type="rc_smf")
     cases, elf_res = gen.apply_lateral_seismic(
         project,
         params=params,
@@ -79,8 +78,8 @@ def test_generate_combinations_orthogonal_seismic():
     project = Project(model=model, metadata=Metadata(title="Test Building"))
     gen = LoadGenerator(units="kN, m")
 
-    gen.apply_gravity_loads(project)
-    gen.apply_lateral_seismic(project, direction="both")
+    gen.apply_gravity_loads(project, occupancy="office", superimposed_dead=1.5)
+    gen.apply_lateral_seismic(project, params=SeismicParameters(sds=0.75, sd1=0.40, site_class="D", risk_category="II", system_type="rc_smf"), direction="both")
 
     # Generate LRFD combinations with orthogonal combinations enabled
     combs = gen.generate_combinations(project, design_method="LRFD", orthogonal_seismic=True)

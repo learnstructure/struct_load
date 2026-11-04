@@ -187,10 +187,12 @@ _OCCUPANCY_ALIASES: Dict[str, str] = {
 
 def lookup_occupancy(query: str) -> OccupancyLiveLoad:
     """
-    Search the ASCE 7 occupancy database using a fuzzy/alias match.
-    Falls back to 'office' if unrecognized.
+    Search the ASCE 7 occupancy database using an exact, alias, or token match.
+    Raises KeyError if unrecognized.
     """
     norm = query.strip().lower().replace(" ", "_").replace("-", "_")
+    if not norm:
+        raise KeyError("Occupancy query cannot be empty.")
     if norm in _OCCUPANCY_DATABASE:
         return _OCCUPANCY_DATABASE[norm]
 
@@ -198,10 +200,13 @@ def lookup_occupancy(query: str) -> OccupancyLiveLoad:
     if target_key and target_key in _OCCUPANCY_DATABASE:
         return _OCCUPANCY_DATABASE[target_key]
 
-    # Substring search
+    norm_tokens = set(norm.split("_"))
     for key, val in _OCCUPANCY_DATABASE.items():
-        if key in norm or norm in key:
+        if key in norm or norm in key.split("_"):
             return val
+    for alias, target_key in _OCCUPANCY_ALIASES.items():
+        if alias in norm_tokens and target_key in _OCCUPANCY_DATABASE:
+            return _OCCUPANCY_DATABASE[target_key]
 
     raise KeyError(
         f"Occupancy '{query}' not found in ASCE 7 database. "
@@ -211,8 +216,9 @@ def lookup_occupancy(query: str) -> OccupancyLiveLoad:
 
 def get_occupancy_live_load(
     occupancy: str,
+    *,
+    units: Union[str, Any, dict],
     include_partitions: bool = True,
-    units: Union[str, Any, dict] = "kN, m",
 ) -> float:
     """
     Retrieve the standard design live load intensity for an occupancy.
@@ -224,34 +230,32 @@ def get_occupancy_live_load(
     include_partitions : bool
         Whether to add standard partition allowance (15 psf / 0.72 kPa for offices).
     units : str, Units, or dict
-        Active engineering units (e.g. 'kN, m' or 'kip, in').
+        Active engineering units (e.g. 'kN, m', 'kip, ft', 'lbf, ft').
 
     Returns
     -------
     float
-        Design uniform live load pressure.
+        Design uniform live load pressure in the active pressure unit
+        (kPa for 'kN, m', ksf for 'kip, ft', psf for 'lbf, ft', ksi for 'kip, in').
     """
-    from struct_core import parse_units
+    from struct_core import conversion_factor, parse_units
     active_units = parse_units(units)
     occ = lookup_occupancy(occupancy)
-    if active_units.length in ("in", "ft") or active_units.force in ("kip", "lb", "lbf"):
-        load = occ.uniform_psf
-        if include_partitions and occ.partition_psf > 0:
-            load += occ.partition_psf
-        return round(load, 4)
-    else:
-        load = occ.uniform_kpa
-        if include_partitions and occ.partition_kpa > 0:
-            load += occ.partition_kpa
-        return round(load, 4)
+    # Convert from the exact tabulated value of the matching unit family (psf for US, kPa for SI)
+    if active_units.length in ("in", "ft") or active_units.force in ("kip", "lbf"):
+        load = occ.uniform_psf + (occ.partition_psf if include_partitions else 0.0)
+        return load * conversion_factor("lbf, ft", active_units, "pressure")
+    load = occ.uniform_kpa + (occ.partition_kpa if include_partitions else 0.0)
+    return load * conversion_factor("kN, m", active_units, "pressure")
 
 
 def calculate_live_load_reduction(
     L0: float,
     tributary_area: float,
+    *,
+    units: Union[str, Any, dict],
     k_ll: float = 2.0,
     is_multi_story: bool = False,
-    units: Union[str, Any, dict] = "kN, m",
 ) -> float:
     """
     Calculate reduced design live load per ASCE 7-16/22 Eq. 4.7-1.
@@ -277,10 +281,7 @@ def calculate_live_load_reduction(
     from struct_core import parse_units, conversion_factor, Units
     active_units = parse_units(units)
     # Area must be in ft² for ASCE 7 Eq. 4.7-1
-    if active_units.length in ("in", "ft") or active_units.force in ("kip", "lb", "lbf"):
-        area_ft2 = tributary_area
-    else:
-        area_ft2 = tributary_area * conversion_factor(active_units, Units(force="kN", length="ft"), "area")
+    area_ft2 = tributary_area * conversion_factor(active_units, Units(force="kip", length="ft"), "area")
 
     ai = k_ll * area_ft2
     if ai < 400.0:

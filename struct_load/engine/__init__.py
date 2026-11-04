@@ -13,6 +13,7 @@ from .geometry import (
 from .mass_source import (
     MassSourceResult,
     calculate_mass_source,
+    create_asce7_mass_source,
 )
 from .self_weight import (
     apply_self_weight,
@@ -43,5 +44,6 @@ __all__ = [
     "distribute_area_loads_to_beams",
     "apply_floor_load_to_frame",
     "calculate_mass_source",
+    "create_asce7_mass_source",
     "MassSourceResult",
 ]

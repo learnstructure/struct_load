@@ -24,17 +24,16 @@ def test_units_auto_inference_us():
     dead_case, live_case = gen.apply_gravity_loads(
         project,
         occupancy="office",
-        tributary_width=15.0,  # 15 ft
-        superimposed_dead=20.0,  # 20 psf
+        one_way_span="y",
+        superimposed_dead=0.020,  # 20 psf, in the model's ksf
         include_self_weight=False,
     )
 
-    # In US units: office live load = 50 psf + 15 psf partition = 65 psf
-    # 65 psf * 15 ft = 975 plf = 0.975 kip/ft (or 975 lb/ft)
+    # Office live load = 50 psf + 15 psf partition = 65 psf = 0.065 ksf
+    # Bay Y = 5.0 ft -> trib width = 2.5 ft -> 0.065 * 2.5 = 0.1625 kip/ft
     assert len(live_case.element_loads) > 0
     first_live = live_case.element_loads[0]
-    # Magnitude: 65 * 15 = 975
-    assert abs(first_live.wz) == pytest.approx(975.0, rel=0.01)
+    assert abs(first_live.wz) == pytest.approx(0.1625, rel=0.01)
 
 
 def test_units_auto_inference_si():
@@ -51,14 +50,14 @@ def test_units_auto_inference_si():
     dead_case, live_case = gen.apply_gravity_loads(
         project,
         occupancy="classroom",
-        tributary_width=4.0,  # 4 m
+        one_way_span="y",
         superimposed_dead=1.0,  # 1 kPa
         include_self_weight=False,
     )
-    # classroom: 1.92 kPa * 4 m = 7.68 kN/m
+    # classroom: 1.92 kPa * 2.5 m (trib width for 5m bay) = 4.80 kN/m
     assert len(live_case.element_loads) > 0
     first_live = live_case.element_loads[0]
-    assert abs(first_live.wz) == pytest.approx(7.68, rel=0.01)
+    assert abs(first_live.wz) == pytest.approx(4.80, rel=0.01)
 
 
 def test_units_canonical_string_inference():
@@ -70,9 +69,8 @@ def test_units_canonical_string_inference():
     assert u.force == "kip"
     assert u.length == "in"
 
-    model_si = build_3d_frame_model()
-    model_si.units = "kN, m"
-    u_si = gen.get_units(model_si)
+    project_si = Project(model=build_3d_frame_model(), units="kN, m")
+    u_si = gen.get_units(project_si)
     assert u_si.force == "kN"
     assert u_si.length == "m"
 
@@ -81,14 +79,12 @@ def test_apply_gravity_loads_no_double_counting():
     """Verify materialized self-weight sets include_self_weight=False to prevent double counting."""
     from struct_load import apply_self_weight
 
-    model = build_3d_frame_model()
-    model.units = "kN, m"
+    project = Project(model=build_3d_frame_model(), units="kN, m")
     gen = LoadGenerator()
 
     dead_case, live_case = gen.apply_gravity_loads(
-        model,
+        project,
         occupancy="office",
-        tributary_width=4.0,
         superimposed_dead=1.5,
         include_self_weight=True,
     )
@@ -99,6 +95,6 @@ def test_apply_gravity_loads_no_double_counting():
     assert loads_before > 0
 
     # Running apply_self_weight should NOT add loads again since include_self_weight is False
-    apply_self_weight(model, target_case_id=dead_case.id)
+    apply_self_weight(project.model, target_case_id=dead_case.id)
     # The dead case should maintain the exact same loads
     assert len(dead_case.element_loads) == loads_before
