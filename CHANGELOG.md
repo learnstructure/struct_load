@@ -7,6 +7,9 @@ All notable changes to `struct_load` are recorded in this file. The format follo
 ## [Unreleased]
 
 ### Added
+- `apply_self_weight` on a fem3d `Structure` adds the self-weight of its shell elements (unit weight x membrane
+  thickness, CSI §10.12) as fem3d `ShellLoad`s along the gravity axis, once (fem3d/SHELL_PLAN.md, M5). A structure
+  with shells is treated as 3D. Test: `fem3d/tests/test_shell_structure.py`.
 - Shell elements in self-weight and mass (fem3d/SHELL_PLAN.md, M1); without them the ELF seismic weight of a model
   with slabs or walls was understated:
   - `calculate_self_weight` and `apply_self_weight` add `ShellLoad` self-weight (unit weight x membrane thickness,

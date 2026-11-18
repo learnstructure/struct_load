@@ -322,7 +322,7 @@ def apply_self_weight(
         g_accel = gravity_accel if gravity_accel is not None else active_units.gravity_acceleration
 
         # Detect 2D vs 3D
-        is_3d = False
+        is_3d = bool(getattr(source, "shells", None))  # shell elements exist only in fem3d
         elem_values = list(source.elements.values())
         for el in elem_values:
             if type(el).__name__ in ("FrameElement", "Frame3D", "Beam3D") or hasattr(el, "w3") or hasattr(el, "wz"):
@@ -395,6 +395,22 @@ def apply_self_weight(
                 sw_load = Fem2dDistributedLoad(element=el, wx=wx_loc, wy=wy_loc)
                 sw_load.is_self_weight = True
                 source.add_load(sw_load)
+
+        # Shell elements of a fem3d Structure: unit weight x membrane thickness per unit area (CSI Analysis Reference
+        # Manual §10.12), along the gravity axis
+        shells = getattr(source, "shells", None) or {}
+        if shells:
+            from fem3d.loads import ShellLoad as Fem3dShellLoad
+
+            # the same directions as the frame loads above: gravity acts in the negative sense of the axis
+            axis = {"-y": "y", "y-": "y", "-2": "y", "-x": "x", "x-": "x", "-1": "x"}.get(grav_dir, "z")
+            done = {load.shell.id for load in getattr(source, "loads", [])
+                    if getattr(load, "is_self_weight", False) and getattr(load, "shell", None) is not None}
+            for sid, shell in shells.items():
+                if sid in done:
+                    continue
+                w = _solver_weight_density(shell.material, g_accel) * shell.thickness
+                source.add_load(Fem3dShellLoad(shell, -w, axis, is_self_weight=True))
 
         return source
 
