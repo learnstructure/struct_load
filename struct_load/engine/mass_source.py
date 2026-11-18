@@ -24,7 +24,7 @@ from .geometry import (
     detect_model_dimensionality,
     detect_story_elevations,
 )
-from .self_weight import element_mass_per_length
+from .self_weight import element_mass_per_length, shell_self_weights, shell_tributary
 
 
 @dataclass
@@ -186,6 +186,30 @@ def calculate_mass_source(
             if elem_m and float(elem_m) > 0.0:
                 element_masses[e.id] += float(elem_m)
 
+    # 3b. Shell elements: mass lumped at their nodes in proportion to the diagonal of the consistent mass matrix,
+    # on the three translations (CSI Analysis Reference Manual §10.11). Self-mass from the section (CSI §10.12
+    # weight / g) when element mass is included; uniform shell loads of the mass-source patterns below.
+    def _add_node_mass(nid: Any, m_equiv: float) -> None:
+        if ms.lateral_only:
+            if v_axis == "z":
+                nodal_masses[nid][0] += m_equiv
+                nodal_masses[nid][1] += m_equiv
+            else:
+                nodal_masses[nid][0] += m_equiv
+                if not is_2d:
+                    nodal_masses[nid][2] += m_equiv
+        else:
+            nodal_masses[nid][0] += m_equiv
+            nodal_masses[nid][1] += m_equiv
+            nodal_masses[nid][2] += m_equiv
+
+    shell_trib = shell_tributary(model) if model.shell_elements else {}
+    if ms.include_element_mass and shell_trib:
+        for eid, w_area in shell_self_weights(model, active_units).items():
+            area, shares = shell_trib[eid]
+            for nid, frac in shares:
+                _add_node_mass(nid, w_area * area * frac / gravity_accel)
+
     # 4. Incorporate applied load patterns (m = c_k * W_k / g)
     for factor_item in ms.factors:
         cid = factor_item.load_case_id
@@ -274,6 +298,20 @@ def calculate_mass_source(
                 continue
             m_equiv = (f_grav * c_scale) / gravity_accel
             element_masses[eid] += m_equiv / L
+
+        # 4b-3. Uniform loads on shell elements (shell self-weight is already counted by include_element_mass)
+        for sl in getattr(lc, "shell_loads", []):
+            if ms.include_element_mass and sl.is_self_weight:
+                continue
+            press = abs(float(sl.pressure))
+            if press <= 0.0:
+                continue
+            for eid in sl.element_ids:
+                if eid not in shell_trib:
+                    raise ValueError(f"Shell load in load case {cid!r} references missing shell element {eid!r}.")
+                area, shares = shell_trib[eid]
+                for nid, frac in shares:
+                    _add_node_mass(nid, press * area * frac * c_scale / gravity_accel)
 
         # 4c. Area loads (projected to bounding nodes or elevation)
         for al in getattr(lc, "area_loads", []):

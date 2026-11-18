@@ -47,7 +47,13 @@ from .engine.geometry import (
     is_horizontal_beam,
 )
 from .engine.mass_source import calculate_mass_source
-from .engine.self_weight import calculate_section_area, calculate_self_weight, element_mass_per_length
+from .engine.self_weight import (
+    calculate_section_area,
+    calculate_self_weight,
+    element_mass_per_length,
+    shell_self_weights,
+    shell_tributary,
+)
 from .engine.tributary import (
     apply_floor_load_to_frame,
     distribute_area_loads_to_beams,
@@ -493,6 +499,17 @@ class LoadGenerator:
 
         # Track elements with explicit dead load
         loaded_elements: Set[Any] = set()
+        # Shell elements whose self-weight is already in a dead case (self-weight shell loads)
+        shells_with_self_weight: Set[Any] = set()
+        shell_trib = shell_tributary(model) if model.shell_elements else {}
+
+        def _add_shell_weight(eid: Any, total: float) -> None:
+            """Add a shell element's weight to the stories of its nodes, in the shares of CSI §10.11."""
+            _, shares = shell_trib[eid]
+            for nid, frac in shares:
+                node = nodes_map[nid]
+                node_z = getattr(node, "z", 0.0) if v_axis == "z" else node.y
+                story_weights[_closest_story_idx(node_z)] += total * frac
 
         for lc, c_scale, marks_dead in weighted_cases:
             if c_scale <= 0.0:
@@ -528,6 +545,16 @@ class LoadGenerator:
                     idx2 = _closest_story_idx(z2)
                     story_weights[idx1] += 0.5 * load_mag
                     story_weights[idx2] += 0.5 * load_mag
+
+            # Uniform loads on shell elements (load per area x element area)
+            for sl in getattr(lc, "shell_loads", []):
+                for eid in sl.element_ids:
+                    if eid not in shell_trib:
+                        raise ValueError(f"Shell load in load case {lc.id!r} references missing shell element "
+                                         f"{eid!r}.")
+                    if marks_dead and sl.is_self_weight:
+                        shells_with_self_weight.add(eid)
+                    _add_shell_weight(eid, abs(float(sl.pressure)) * shell_trib[eid][0] * c_scale)
 
             # Point loads
             for pl in lc.point_loads:
@@ -585,6 +612,12 @@ class LoadGenerator:
                 idx2 = _closest_story_idx(z2)
                 story_weights[idx1] += 0.5 * total_w
                 story_weights[idx2] += 0.5 * total_w
+
+        # 3. Self-weight of shell elements not already carried by a dead case (CSI Analysis Reference Manual §10.12)
+        if shell_trib:
+            for eid, w_area in shell_self_weights(model, active_units).items():
+                if eid not in shells_with_self_weight:
+                    _add_shell_weight(eid, w_area * shell_trib[eid][0])
 
         return [round(w, 2) for w in story_weights]
 

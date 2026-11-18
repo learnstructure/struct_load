@@ -7,6 +7,15 @@ All notable changes to `struct_load` are recorded in this file. The format follo
 ## [Unreleased]
 
 ### Added
+- Shell elements in self-weight and mass (fem3d/SHELL_PLAN.md, M1); without them the ELF seismic weight of a model
+  with slabs or walls was understated:
+  - `calculate_self_weight` and `apply_self_weight` add `ShellLoad` self-weight (unit weight x membrane thickness,
+    CSI Analysis Reference Manual §10.12), once per element.
+  - `calculate_mass_source` lumps shell self-mass and the shell loads of its load patterns at the element nodes, in
+    the shares of CSI §10.11, so nodal masses, total weight, center of mass, and story masses include shells.
+  - `LoadGenerator.calculate_model_seismic_weight` adds shell loads and the shell self-weight not already in a dead
+    case to the stories of the element nodes.
+  - New helpers `shell_weight_per_area`, `shell_self_weights`, and `shell_tributary`.
 - `element_weight_per_length` and `element_mass_per_length`: the self-weight and self-mass per unit length of a
   frame element, with its `weight` and `mass` modifiers (`BeamElement.stiffness_modifiers`).
 

@@ -6,7 +6,7 @@ Calculates distributed gravity loads directly from element geometry and material
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 from struct_core import (
     CircularSection,
     DistributedLoad,
@@ -14,6 +14,7 @@ from struct_core import (
     LoadCase,
     Project,
     RectangularSection,
+    ShellLoad,
     StructuralModel,
     Units,
     parse_units,
@@ -68,6 +69,68 @@ def _solver_weight_density(material: object, gravity_accel: float) -> float:
                      f"be computed.")
 
 
+def shell_weight_per_area(section: object, material: object, units: Units) -> float:
+    """Self-weight per unit area of a shell element: unit weight x membrane thickness th (CSI Analysis Reference
+    Manual §10.12)."""
+    return material_weight_density(material, units) * float(section.thickness)
+
+
+def shell_tributary(model: StructuralModel) -> Dict[object, Tuple[float, List[Tuple[object, float]]]]:
+    """Area of every shell element and the fraction of it lumped at each node: ``{element_id: (area, [(node_id,
+    fraction), ...])}``. The fractions follow the diagonal of the consistent mass matrix, as SAP2000 lumps shell mass
+    and uniform loads (CSI Analysis Reference Manual §10.11; ``struct_core.geometry.shell_corner_weights``).
+    Elements with missing nodes are refused."""
+    from struct_core.geometry import model_shell_coordinates, shell_areas, shell_corner_weights
+
+    out: Dict[object, Tuple[float, List[Tuple[object, float]]]] = {}
+    groups = model_shell_coordinates(model)
+    n_found = sum(len(ids) for ids, _ in groups.values())
+    if n_found != len(model.shell_elements):
+        raise ValueError("Shell elements reference missing nodes; validate the model first.")
+    by_id = {el.id: el for el in model.shell_elements}
+    for ids, coords in groups.values():
+        areas = shell_areas(coords)
+        weights = shell_corner_weights(coords)
+        for i, eid in enumerate(ids):
+            out[eid] = (float(areas[i]), list(zip(by_id[eid].node_ids, (float(w) for w in weights[i]))))
+    return out
+
+
+def shell_self_weights(model: StructuralModel, units: Units) -> Dict[object, float]:
+    """Self-weight per unit area of every shell element, ``{element_id: weight}`` (CSI §10.12)."""
+    materials_map = {m.id: m for m in model.materials}
+    sections_map = {s.id: s for s in model.shell_sections}
+    out: Dict[object, float] = {}
+    for el in model.shell_elements:
+        sec = sections_map.get(el.section_id)
+        if sec is None:
+            raise ValueError(f"Shell element {el.id!r} references missing shell section {el.section_id!r}.")
+        mat = materials_map.get(sec.material_id)
+        if mat is None:
+            raise ValueError(f"Shell section {sec.id!r} on element {el.id!r} references missing material "
+                             f"{sec.material_id!r}.")
+        out[el.id] = shell_weight_per_area(sec, mat, units)
+    return out
+
+
+def _shell_self_weight_loads(model: StructuralModel, units: Units, direction: str) -> List[ShellLoad]:
+    """Self-weight of the shell elements as uniform shell loads, one per distinct weight per area."""
+    weights = shell_self_weights(model, units)
+    by_weight: Dict[float, List[object]] = {}
+    for eid, w in weights.items():
+        if w > 0.0:
+            by_weight.setdefault(w, []).append(eid)
+    d = direction.lower()
+    axis = {"-z": "z", "z-": "z", "down_z": "z", "gravity": "z", "+z": "z", "z+": "z",
+            "-y": "y", "y-": "y", "down_y": "y", "+y": "y", "y+": "y",
+            "-x": "x", "x-": "x", "+x": "x", "x+": "x"}.get(d)
+    if axis is None:
+        raise ValueError(f"Unknown self-weight direction {direction!r}")
+    sign = 1.0 if d.startswith("+") or d.endswith("+") else -1.0
+    return [ShellLoad(element_ids=eids, pressure=sign * w, direction=axis, is_self_weight=True)
+            for w, eids in by_weight.items()]
+
+
 def calculate_section_area(section: object) -> float:
     """
     Calculate cross-sectional area A (m² for SI, in² for US) from a section schema.
@@ -93,7 +156,8 @@ def calculate_self_weight(
     direction: Optional[str] = None,
 ) -> LoadCase:
     """
-    Compute self-weight line loads for all beam/column elements in a StructuralModel.
+    Compute self-weight line loads for all beam/column elements in a StructuralModel, and uniform loads (weight per
+    unit area, CSI Analysis Reference Manual §10.12) for its shell elements.
 
     Parameters
     ----------
@@ -113,7 +177,7 @@ def calculate_self_weight(
     Returns
     -------
     LoadCase
-        A struct_core.LoadCase populated with DistributedLoad items.
+        A struct_core.LoadCase populated with DistributedLoad items and, for shell elements, ShellLoad items.
     """
     # 1. Resolve active Units
     if units is not None:
@@ -193,12 +257,26 @@ def calculate_self_weight(
 
         element_loads.append(load)
 
+    shell_loads = _shell_self_weight_loads(model, active_units, direction) if model.shell_elements else []
+
     return LoadCase(
         id=load_case_id,
         name="Dead Load (Self-Weight)",
         element_loads=element_loads,
+        shell_loads=shell_loads,
         include_self_weight=True,
     )
+
+
+def _new_shell_self_weight(case: LoadCase, sw_case: LoadCase) -> List[ShellLoad]:
+    """Self-weight shell loads of ``sw_case`` for the shell elements that do not yet carry self-weight in ``case``."""
+    done = {eid for sl in case.shell_loads if sl.is_self_weight for eid in sl.element_ids}
+    out = []
+    for sl in sw_case.shell_loads:
+        eids = [eid for eid in sl.element_ids if eid not in done]
+        if eids:
+            out.append(sl.model_copy(update={"element_ids": eids}))
+    return out
 
 
 def apply_self_weight(
@@ -350,6 +428,7 @@ def apply_self_weight(
             already_eids = {dl.element_id for dl in lc.element_loads if getattr(dl, "is_self_weight", False)}
             new_loads = [dl for dl in sw_case.element_loads if dl.element_id not in already_eids]
             lc.element_loads.extend(new_loads)
+            lc.shell_loads.extend(_new_shell_self_weight(lc, sw_case))
             lc.include_self_weight = False
     else:
         target_id = target_case_id or "DEAD"
@@ -367,6 +446,7 @@ def apply_self_weight(
             already_eids = {dl.element_id for dl in target_case.element_loads if getattr(dl, "is_self_weight", False)}
             new_loads = [dl for dl in sw_case.element_loads if dl.element_id not in already_eids]
             target_case.element_loads.extend(new_loads)
+            target_case.shell_loads.extend(_new_shell_self_weight(target_case, sw_case))
             target_case.include_self_weight = False
         else:
             sw_case.include_self_weight = False
