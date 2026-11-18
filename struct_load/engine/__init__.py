@@ -18,6 +18,8 @@ from .mass_source import (
 from .self_weight import (
     apply_self_weight,
     calculate_section_area,
+    element_mass_per_length,
+    element_weight_per_length,
     calculate_self_weight,
 )
 from .tributary import (
@@ -36,6 +38,8 @@ __all__ = [
     "get_beam_length",
     "get_beam_span_and_orientation",
     "calculate_section_area",
+    "element_mass_per_length",
+    "element_weight_per_length",
     "calculate_self_weight",
     "apply_self_weight",
     "distribute_1d_tributary",

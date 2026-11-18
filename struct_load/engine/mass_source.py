@@ -24,7 +24,7 @@ from .geometry import (
     detect_model_dimensionality,
     detect_story_elevations,
 )
-from .self_weight import calculate_section_area, material_weight_density
+from .self_weight import element_mass_per_length
 
 
 @dataclass
@@ -355,8 +355,7 @@ def calculate_mass_source(
             mat = materials_map.get(mat_id)  # the section owns the material
             if mat is None:
                 raise ValueError(f"Section {sec.id!r} on element {e.id!r} references missing material {mat_id!r}.")
-            area = calculate_section_area(sec)
-            e_self_m = material_weight_density(mat, active_units) * area / gravity_accel
+            e_self_m = element_mass_per_length(e, sec, mat, active_units, gravity_accel)
 
         total_elem_m = (e_self_m + e_extra_m) * L
         mid_x = 0.5 * (n_i.x + n_j.x)
@@ -420,8 +419,7 @@ def calculate_mass_source(
                 mat = materials_map.get(mat_id)  # the section owns the material
                 if mat is None:
                     raise ValueError(f"Section {sec.id!r} on element {e.id!r} references missing material {mat_id!r}.")
-                area = calculate_section_area(sec)
-                e_self_m = material_weight_density(mat, active_units) * area / gravity_accel
+                e_self_m = element_mass_per_length(e, sec, mat, active_units, gravity_accel)
 
             total_elem_m = (e_self_m + e_extra_m) * L
             if abs(z_i - z_j) < 1e-4:

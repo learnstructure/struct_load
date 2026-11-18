@@ -274,3 +274,38 @@ def test_mass_source_skips_self_weight_loads_when_element_mass_included():
     self_weight = 2400.0 * g / 1000.0 * 0.16 * (4.0 + 4.0 + 6.0)
     sdl = 1.5 * 5.0 * 6.0
     assert res.total_seismic_weight == pytest.approx(self_weight + sdl, rel=1e-6)
+
+
+def test_element_mass_and_weight_modifiers_act_as_in_sap2000():
+    """The element's mass modifier scales its self-mass, the weight modifier its self-weight, and the A modifier
+    neither (SAP2000 27.1, measured in the struct_link tests). Regression: all three were ignored."""
+    from struct_core import Project, Support
+    from struct_load import calculate_self_weight, element_mass_per_length, element_weight_per_length
+
+    def model(mods):
+        return StructuralModel(
+            nodes=[Node(id="A", x=0.0, y=0.0, z=0.0), Node(id="B", x=4.0, y=0.0, z=0.0)],
+            materials=[ElasticMaterial(id="C", E=25e6, unit_weight=24.0)],
+            sections=[RectangularSection(id="R", material_id="C", b=0.3, h=0.5)],
+            elements=[BeamElement(id="E", start_node="A", end_node="B", section_id="R", stiffness_modifiers=mods)],
+            supports=[Support.fixed_3d("A")],
+            units="kN, m",
+        )
+
+    def weight(mods):
+        return -calculate_self_weight(model(mods), units="kN, m").element_loads[0].wz
+
+    def mass(mods):
+        return calculate_mass_source(model(mods), units="kN, m").total_mass
+
+    assert weight(None) == pytest.approx(24.0 * 0.15)
+    assert weight({"weight": 0.5}) == pytest.approx(0.5 * weight(None))
+    assert weight({"A": 0.5, "mass": 0.5}) == pytest.approx(weight(None))
+    assert mass({"mass": 0.5}) == pytest.approx(0.5 * mass(None))
+    assert mass({"A": 0.5, "weight": 0.5}) == pytest.approx(mass(None))
+    m = model({"mass": 0.25, "weight": 2.0})
+    elem, sec, mat = m.elements[0], m.sections[0], m.materials[0]
+    from struct_core import parse_units
+    units = parse_units("kN, m")
+    assert element_weight_per_length(elem, sec, mat, units) == pytest.approx(2.0 * 3.6)
+    assert element_mass_per_length(elem, sec, mat, units, 9.80665) == pytest.approx(0.25 * 3.6 / 9.80665)

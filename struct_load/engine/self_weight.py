@@ -35,6 +35,26 @@ def material_weight_density(material: object, units: Units) -> float:
     raise ValueError(f"Material {name!r} has no density (unit_weight or rho); its self-weight cannot be computed.")
 
 
+def _modifier(element: object, key: str) -> float:
+    mods = getattr(element, "stiffness_modifiers", None) or {}
+    return float(mods.get(key, 1.0))
+
+
+def element_weight_per_length(element: object, section: object, material: object, units: Units) -> float:
+    """Self-weight per unit length of a frame element: unit weight x section area x the element's ``weight``
+    modifier. The ``A`` modifier is not applied: as in SAP2000 and ETABS, it changes the axial stiffness only, and the
+    weight and mass have their own modifiers (checked against SAP2000 27.1, struct_link tests)."""
+    return material_weight_density(material, units) * calculate_section_area(section) * _modifier(element, "weight")
+
+
+def element_mass_per_length(element: object, section: object, material: object, units: Units,
+                            gravity_accel: float) -> float:
+    """Self-mass per unit length of a frame element (consistent mass units): unit weight x section area / g x the
+    element's ``mass`` modifier (the ``A`` modifier is not applied; see :func:`element_weight_per_length`)."""
+    return (material_weight_density(material, units) * calculate_section_area(section) / gravity_accel
+            * _modifier(element, "mass"))
+
+
 def _solver_weight_density(material: object, gravity_accel: float) -> float:
     """Weight per unit volume of a fem2d / fem3d material: its ``unit_weight``, else its mass density times gravity.
     Solver materials hold ``rho`` in consistent units (e.g. t/m3 for kN, m), so no mass-unit factor applies."""
@@ -148,13 +168,10 @@ def calculate_self_weight(
         if mat is None:
             raise ValueError(f"Section {sec.id!r} on element {elem.id!r} references missing material {mat_id!r}.")
 
-        area = calculate_section_area(sec)
-        if area <= 0.0:
+        if calculate_section_area(sec) <= 0.0:
             continue
 
-        w = material_weight_density(mat, active_units) * area
-
-        w_mag = float(w)
+        w_mag = float(element_weight_per_length(elem, sec, mat, active_units))
         if w_mag <= 0.0:
             continue
 

@@ -47,7 +47,7 @@ from .engine.geometry import (
     is_horizontal_beam,
 )
 from .engine.mass_source import calculate_mass_source
-from .engine.self_weight import calculate_section_area, calculate_self_weight, material_weight_density
+from .engine.self_weight import calculate_section_area, calculate_self_weight, element_mass_per_length
 from .engine.tributary import (
     apply_floor_load_to_frame,
     distribute_area_loads_to_beams,
@@ -565,7 +565,9 @@ class LoadGenerator:
             if area <= 0.0:
                 continue
 
-            w_unit = material_weight_density(mat, active_units) * area
+            # Seismic weight = mass x g: the element's mass modifier applies (as in the CSI mass source)
+            g_accel = active_units.gravity_acceleration
+            w_unit = element_mass_per_length(elem, sec, mat, active_units, g_accel) * g_accel
 
             length = get_beam_length(elem, nodes_map)
             total_w = float(w_unit) * length
