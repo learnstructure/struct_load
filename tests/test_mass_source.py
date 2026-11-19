@@ -309,3 +309,23 @@ def test_element_mass_and_weight_modifiers_act_as_in_sap2000():
     units = parse_units("kN, m")
     assert element_weight_per_length(elem, sec, mat, units) == pytest.approx(2.0 * 3.6)
     assert element_mass_per_length(elem, sec, mat, units, 9.80665) == pytest.approx(0.25 * 3.6 / 9.80665)
+
+
+def test_nodal_added_mass_converted_to_consistent_units():
+    """Node.mass is stored in units.mass (e.g. kg in 'kN, m'); calculate_mass_source outputs consistent mass (tonnes)."""
+    from struct_core import Support
+
+    model = StructuralModel(
+        units="kN, m",
+        nodes=[Node(id="1", x=0.0, y=0.0, z=0.0), Node(id="2", x=4.0, y=0.0, z=0.0, mass=10_000.0)],
+        materials=[ElasticMaterial(id="M", E=30e6, rho=0.0)],
+        sections=[RectangularSection(id="S", material_id="M", b=0.3, h=0.3)],
+        elements=[BeamElement(id="E1", start_node="1", end_node="2", section_id="S")],
+        supports=[Support.fixed_3d("1")],
+    )
+    ms = MassSource(id="MS", include_element_mass=False, include_added_mass=True, factors=[])
+    res = calculate_mass_source(model, mass_source=ms, units="kN, m")
+    assert res.nodal_masses["2"] == pytest.approx((10.0, 10.0, 10.0), rel=1e-9)
+    assert res.total_mass == pytest.approx(10.0, rel=1e-9)
+    assert res.total_seismic_weight == pytest.approx(10.0 * 9.80665, rel=1e-9)
+

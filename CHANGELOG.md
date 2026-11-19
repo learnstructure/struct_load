@@ -7,6 +7,9 @@ All notable changes to `struct_load` are recorded in this file. The format follo
 ## [Unreleased]
 
 ### Added
+- `LoadGenerator.messages`: `generate_combinations` now records every load case left out of the generated ASCE 7-22
+  combinations (`other`, `temperature`, `soil`, `fluid`, `partition`, and extra cases beyond one per direction for
+  wind, seismic, snow, or roof live), with its ID, type, and reason. Test: `tests/test_generator.py`.
 - `apply_self_weight` on a fem3d `Structure` adds the self-weight of its shell elements (unit weight x membrane
   thickness, CSI §10.12) as fem3d `ShellLoad`s along the gravity axis, once (fem3d/SHELL_PLAN.md, M5). A structure
   with shells is treated as 3D. Test: `fem3d/tests/test_shell_structure.py`.
@@ -24,6 +27,9 @@ All notable changes to `struct_load` are recorded in this file. The format follo
   frame element, with its `weight` and `mass` modifiers (`BeamElement.stiffness_modifiers`).
 
 ### Fixed
+- `calculate_mass_source` now converts user-assigned `Node.mass` and element `mass` from `units.mass` to consistent
+  solver mass units (`units.consistent_mass_factor`), matching `fem2d`, `fem3d`, and `self_weight`. Test:
+  `tests/test_mass_source.py`.
 - The element `weight` and `mass` modifiers were ignored. Self-weight (`calculate_self_weight`) now follows the
   weight modifier, and the element self-mass of the mass source and the story seismic weights follow the mass
   modifier (the seismic weight is the mass times g, as in the CSI mass source). The `A` modifier changes neither:

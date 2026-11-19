@@ -78,6 +78,7 @@ class LoadGenerator:
             from model or project units, or defaults to 'kN, m'.
         """
         self._units = parse_units(units) if units is not None else None
+        self.messages: List[str] = []
 
     @property
     def units(self) -> Optional[Units]:
@@ -1028,7 +1029,8 @@ class LoadGenerator:
 
         from struct_core import classify_load_case
 
-        # Categorize load cases using canonical classifier
+        # Categorize load cases using canonical classifier; record every omitted case in self.messages
+        self.messages = []
         dead_ids: List[Any] = []
         live_ids: List[Any] = []
         roof_live_id: Optional[Any] = None
@@ -1050,27 +1052,66 @@ class LoadGenerator:
             elif cat == "roof_live":
                 if roof_live_id is None:
                     roof_live_id = lc.id
+                else:
+                    self.messages.append(
+                        f"Load case {lc.id!r} (type 'roof_live') was left out of the generated combinations: "
+                        f"only one roof_live case is supported (already using {roof_live_id!r})."
+                    )
             elif cat == "snow":
                 if snow_id is None:
                     snow_id = lc.id
+                else:
+                    self.messages.append(
+                        f"Load case {lc.id!r} (type 'snow') was left out of the generated combinations: "
+                        f"only one snow case is supported (already using {snow_id!r})."
+                    )
             elif cat == "wind":
                 is_y = l_dir == "Y" or "_y" in cid_str or cid_str.endswith("y")
                 if is_y:
                     if wind_y_id is None:
                         wind_y_id = lc.id
+                    else:
+                        self.messages.append(
+                            f"Load case {lc.id!r} (type 'wind') was left out of the generated combinations: "
+                            f"only one wind case per direction is supported (already using {wind_y_id!r} for Y)."
+                        )
                 else:
                     if wind_x_id is None:
                         wind_x_id = lc.id
+                    else:
+                        self.messages.append(
+                            f"Load case {lc.id!r} (type 'wind') was left out of the generated combinations: "
+                            f"only one wind case per direction is supported (already using {wind_x_id!r} for X)."
+                        )
             elif cat == "seismic":
                 is_y = l_dir == "Y" or "_y" in cid_str or cid_str.endswith("y")
                 if is_y:
                     if eq_y_id is None:
                         eq_y_id = lc.id
+                    else:
+                        self.messages.append(
+                            f"Load case {lc.id!r} (type 'seismic') was left out of the generated combinations: "
+                            f"only one seismic case per direction is supported (already using {eq_y_id!r} for Y)."
+                        )
                 else:
                     if eq_x_id is None:
                         eq_x_id = lc.id
+                    else:
+                        self.messages.append(
+                            f"Load case {lc.id!r} (type 'seismic') was left out of the generated combinations: "
+                            f"only one seismic case per direction is supported (already using {eq_x_id!r} for X)."
+                        )
             elif cat == "partition":
-                continue  # Partition weight is for seismic mass source only, not load combinations
+                self.messages.append(
+                    f"Load case {lc.id!r} (type 'partition') was left out of the generated combinations: "
+                    f"partition weight enters the seismic mass source only (ASCE 7-22 §12.7.2), not load combinations."
+                )
+            else:
+                self.messages.append(
+                    f"Load case {lc.id!r} (type {cat!r}) was left out of the generated combinations: "
+                    f"ASCE 7-22 §2.3/§2.4 combination generation does not include load type {cat!r}; "
+                    f"assign its load_type or add it to combinations explicitly."
+                )
 
         if not dead_ids:
             raise ValueError(

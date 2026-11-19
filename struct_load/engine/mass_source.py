@@ -158,33 +158,36 @@ def calculate_mass_source(
     nodal_masses: Dict[Any, List[float]] = {n.id: [0.0, 0.0, 0.0] for n in model.nodes}
     element_masses: Dict[Any, float] = {e.id: 0.0 for e in model.elements}
 
-    # 3. Incorporate user-assigned added mass
+    # 3. Incorporate user-assigned added mass (struct_core stores Node.mass in active_units.mass;
+    # convert to consistent solver mass units F*T^2/L via active_units.consistent_mass_factor)
+    mass_factor = active_units.consistent_mass_factor
     if ms.include_added_mass:
         for n in model.nodes:
             m_val = getattr(n, "mass", 0.0)
             if isinstance(m_val, (int, float)) and m_val > 0.0:
+                m_cons = float(m_val) * mass_factor
                 if ms.lateral_only:
                     if v_axis == "z":
-                        nodal_masses[n.id][0] += float(m_val)
-                        nodal_masses[n.id][1] += float(m_val)
+                        nodal_masses[n.id][0] += m_cons
+                        nodal_masses[n.id][1] += m_cons
                     else:
-                        nodal_masses[n.id][0] += float(m_val)
+                        nodal_masses[n.id][0] += m_cons
                         if not is_2d:
-                            nodal_masses[n.id][2] += float(m_val)
+                            nodal_masses[n.id][2] += m_cons
                 else:
-                    nodal_masses[n.id][0] += float(m_val)
-                    nodal_masses[n.id][1] += float(m_val)
-                    nodal_masses[n.id][2] += float(m_val)
+                    nodal_masses[n.id][0] += m_cons
+                    nodal_masses[n.id][1] += m_cons
+                    nodal_masses[n.id][2] += m_cons
             elif isinstance(m_val, (list, tuple)):
                 vert_idx = 2 if v_axis == "z" else 1
                 for idx_c in range(min(3, len(m_val))):
                     if not (ms.lateral_only and idx_c == vert_idx):
-                        nodal_masses[n.id][idx_c] += float(m_val[idx_c])
+                        nodal_masses[n.id][idx_c] += float(m_val[idx_c]) * mass_factor
 
         for e in model.elements:
             elem_m = getattr(e, "mass", 0.0)
             if elem_m and float(elem_m) > 0.0:
-                element_masses[e.id] += float(elem_m)
+                element_masses[e.id] += float(elem_m) * mass_factor
 
     # 3b. Shell elements: mass lumped at their nodes in proportion to the diagonal of the consistent mass matrix,
     # on the three translations (CSI Analysis Reference Manual §10.11). Self-mass from the section (CSI §10.12

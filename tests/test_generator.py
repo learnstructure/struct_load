@@ -98,3 +98,36 @@ def test_generate_combinations_factors_every_dead_case():
     by_id = {c.id: {f.load_case_id: f.factor for f in c.factors} for c in combs}
     assert by_id["COMB_1.4D"] == {"DEAD": 1.4, "SuperDead": 1.4}
     assert by_id["COMB_1.2D+1.6L"] == {"DEAD": 1.2, "SuperDead": 1.2, "LIVE": 1.6}
+
+
+def test_generate_combinations_reports_omitted_load_cases():
+    """Load cases left out of generated combinations (other, temperature, soil, fluid, partition, or duplicates) are
+    reported in LoadGenerator.messages with their ID, type, and reason."""
+    from struct_core import LoadCase
+
+    project = _build_test_frame()
+    project.model.load_cases = [
+        LoadCase(id="DEAD", load_type="dead", include_self_weight=True),
+        LoadCase(id="LIVE", load_type="live"),
+        LoadCase(id="PAT1", load_type="other"),
+        LoadCase(id="TEMP", load_type="temperature"),
+        LoadCase(id="SOIL", load_type="soil"),
+        LoadCase(id="FLUID", load_type="fluid"),
+        LoadCase(id="PartitionWeight", load_type="partition"),
+        LoadCase(id="WX1", load_type="wind", direction="X"),
+        LoadCase(id="WX2", load_type="wind", direction="X"),
+    ]
+    gen = LoadGenerator(units="kN, m")
+    combs = gen.generate_combinations(project)
+    assert len(combs) > 0
+    assert len(gen.messages) == 6
+    text = "\n".join(gen.messages)
+    for case_id, kind in (
+        ("PAT1", "other"),
+        ("TEMP", "temperature"),
+        ("SOIL", "soil"),
+        ("FLUID", "fluid"),
+        ("PartitionWeight", "partition"),
+        ("WX2", "wind"),
+    ):
+        assert any(case_id in m and kind in m for m in gen.messages), f"Missing message for {case_id} ({kind}): {text}"
