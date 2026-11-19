@@ -18,7 +18,8 @@ All notable changes to `struct_load` are recorded in this file. The format follo
     the shares of CSI §10.11, so nodal masses, total weight, center of mass, and story masses include shells.
   - `LoadGenerator.calculate_model_seismic_weight` adds shell loads and the shell self-weight not already in a dead
     case to the stories of the element nodes.
-  - New helpers `shell_weight_per_area`, `shell_self_weights`, and `shell_tributary`.
+  - Helpers in `struct_load.engine.self_weight`: `shell_weight_per_area`, `shell_self_weights`, and `shell_tributary`.
+  - Tests: `tests/test_shell_weight.py`.
 - `element_weight_per_length` and `element_mass_per_length`: the self-weight and self-mass per unit length of a
   frame element, with its `weight` and `mass` modifiers (`BeamElement.stiffness_modifiers`).
 
@@ -27,3 +28,5 @@ All notable changes to `struct_load` are recorded in this file. The format follo
   weight modifier, and the element self-mass of the mass source and the story seismic weights follow the mass
   modifier (the seismic weight is the mass times g, as in the CSI mass source). The `A` modifier changes neither:
   as SAP2000 27.1 shows (struct_link tests), it scales the axial stiffness only.
+- `examples/07_end_to_end_building_loading.py` now passes `two_way=True` instead of `tributary_width` to
+  `apply_gravity_loads` and `apply_roof_loads` on its 3D frame.

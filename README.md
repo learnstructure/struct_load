@@ -30,11 +30,11 @@ A building code load determination and management package for the [Structural En
   - Project inputs are never assumed: `apply_gravity_loads` requires `occupancy` and `superimposed_dead` (0 for none) and, for one-way distribution (every 2D frame), `tributary_width`; `apply_roof_loads` requires `tributary_width` and reduces the minimum roof live load for the members' `tributary_area` only when it is given (Eq. 4.8-1; R1 = 1 otherwise); `apply_lateral_wind` requires the site's `basic_wind_speed` and the frame's `tributary_width`.
   - ASCE 7 Section 4.7 live load reduction calculator ($L = L_0 (0.25 + 15/\sqrt{K_{LL} A_T})$).
 - **Universal Self-Weight Engine**:
-  - Computes continuous gravity line loads directly from section geometry and the weight density of each section's material (`unit_weight` or $\rho \cdot g$); a material without either raises `ValueError` (no density is assumed).
+  - Computes continuous gravity line loads for frame members (`element_weight_per_length`, `element_mass_per_length`) and uniform surface weights (`unit_weight * thickness`, CSI §10.12) for shell elements from section geometry and material density (`unit_weight` or $\rho \cdot g$). A material without density raises `ValueError`.
   - Works polymorphically on `fem3d.Structure`, `fem2d.Structure`, `struct_core.StructuralModel`, and `Project`.
-  - Automatically detects 3D ($-z$) vs 2D ($-y$) direction and applies `DistributedLoad(..., is_self_weight=True)`.
+  - Automatically detects 3D ($-z$) vs 2D ($-y$) direction (any structure with shells is 3D), applies frame `DistributedLoad(..., is_self_weight=True)` and shell `ShellLoad(..., is_self_weight=True)` once per element. Shell helpers (`shell_weight_per_area`, `shell_self_weights`, `shell_tributary`) live in `struct_load.engine.self_weight`.
 - **Exact Model-Derived Seismic Weights & 3D ELF**:
-  - Calculates exact story seismic weights $W_i$ directly from model Dead loads and member self-weights.
+  - Calculates exact story seismic weights $W_i$ directly from model dead loads, frame self-weights, shell self-weights, and shell loads (`LoadGenerator.calculate_model_seismic_weight`).
   - Directional seismic loads (`EQ_X`, `EQ_Y`, or `direction="both"`).
   - Calculates approximate fundamental period $T_a$, seismic response coefficient $C_s$, base shear $V = C_s W$, and vertical force distribution $F_x, F_y$ along building height.
   - $C_s$ Method 1 (Eq. 12.8-2) requires the multi-period spectrum (`sa_spectrum`); Method 2 (Eqs. 12.8-3 to 12.8-5) is the default. Eq. 12.8-7 is evaluated only when $S_1$ is supplied (`StoryForceResult.s1_bound_evaluated`). $T_a = 0.1N$ (Eq. 12.8-9) is accepted only for moment frames with $N \le 12$ and an average story height ≥ 10 ft (3 m).
@@ -46,9 +46,9 @@ A building code load determination and management package for the [Structural En
     - Permanent operating equipment: 100% ($1.0$, Item 3).
     - Snow load: 15% included only when flat roof snow load $P_f > 45\text{ psf}$ ($2.16\text{ kN/m}^2$, Item 4).
     - Roof gardens: 100% ($1.0$, Item 5).
-  - Commercial-grade mass source evaluation converting load cases into inertial mass ($m = \sum c_i W_i / g$). With `include_element_mass=True`, loads flagged `is_self_weight` are skipped so member self-weight is counted once (`apply_gravity_loads` stores self-weight and superimposed dead as separate entries of the dead case).
+  - Commercial-grade mass source evaluation converting load cases into inertial mass ($m = \sum c_i W_i / g$). With `include_element_mass=True`, frame and shell loads flagged `is_self_weight` are skipped so element self-weight is counted once (`apply_gravity_loads` stores self-weight and superimposed dead as separate entries of the dead case).
   - `generate_combinations` applies the dead-load factor to every dead-type case (e.g. `DEAD` and `SuperDead`).
-  - Supports structural element self-masses ($\rho \cdot A \cdot L$), assigned nodal lumped masses, element masses, and load case forces (point loads, distributed loads, area loads).
+  - Supports frame self-masses ($\rho \cdot A \cdot L$), shell self-masses and `ShellLoad` pressures (lumped to corner nodes via `struct_core.geometry.shell_corner_weights`, CSI §10.11), assigned nodal lumped masses, element masses, and load case forces (point loads, distributed loads, area loads, shell loads). Gravity and roof load generators (`apply_gravity_loads`, `apply_roof_loads`, `distribute_area_loads_to_beams`) apply to frame beams only, not shell elements.
   - Calculates total seismic weight $W$, total inertial mass $M$, global Center of Mass $(X_{cm}, Y_{cm}, Z_{cm})$, and story-by-story mass distribution.
   - `create_asce7_mass_source(model, ...)` factory automatically configures code-compliant mass source from model load cases.
   - Directly consumed by `fem2d` and `fem3d` adapters for modal and response spectrum dynamic analysis.
@@ -169,8 +169,8 @@ struct.apply_self_weight()      # via method on fem3d/fem2d Structure
 
 # Option B: Schema model application (infers units and direction automatically)
 apply_self_weight(project)  # supports in-place and return: project = apply_self_weight(project)
-# Element loads are computed from material unit_weight (or rho * g) and section area,
-# appended to DEAD case.element_loads (with is_self_weight=True), and case.include_self_weight is set to False.
+# Frame loads go to DEAD case.element_loads and shell loads to case.shell_loads
+# (each with is_self_weight=True), and case.include_self_weight is set to False.
 ```
 
 ### 4. Code-Compliant Mass Source & Seismic Diagnostics (ASCE 7-22)
