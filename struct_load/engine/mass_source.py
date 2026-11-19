@@ -26,6 +26,181 @@ from .geometry import (
 )
 from .self_weight import element_mass_per_length, shell_self_weights, shell_tributary
 
+# 3-point Gauss-Legendre rule on [-1, 1] (exact for polynomials up to degree 5;
+# linear load intensity * cubic Timoshenko end-reaction polynomial has degree <= 4).
+_GL3_XI = (-math.sqrt(3.0 / 5.0), 0.0, math.sqrt(3.0 / 5.0))
+_GL3_W = (5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0)
+
+
+def _beam_point_end_i_fraction(s: float, phi: float, rel_i: bool, rel_j: bool) -> float:
+    """Fraction of a transverse unit point load at relative position ``s`` in [0, 1] carried to end ``i``
+    by a Timoshenko/Euler-Bernoulli beam with shear parameter ``phi`` and end moment releases."""
+    if rel_i and rel_j:
+        return 1.0 - s
+    om = 1.0 - s
+    denom = 1.0 + phi
+    v_i = (om * om * (1.0 + 2.0 * s) + om * phi) / denom
+    if not rel_i and not rel_j:
+        return v_i
+    if rel_i:
+        m_i = (s * om * om + 0.5 * s * om * phi) / denom
+        return v_i - (6.0 / (4.0 + phi)) * m_i
+    # rel_j only
+    m_j = -(s * s * om + 0.5 * s * om * phi) / denom
+    return v_i - (6.0 / (4.0 + phi)) * m_j
+
+
+def _member_local_axes(
+    ni: Any, nj: Any, *, is_2d: bool, roll_angle_deg: float = 0.0
+) -> Tuple[float, Tuple[float, float, float], Tuple[float, float, float], Tuple[float, float, float]]:
+    """Return ``(L, e1, e2, e3)`` matching fem2d/fem3d member local axes."""
+    dx = float(nj.x) - float(ni.x)
+    dy = float(nj.y) - float(ni.y)
+    dz = 0.0 if is_2d else (float(getattr(nj, "z", 0.0)) - float(getattr(ni, "z", 0.0)))
+    L = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if L <= 1e-12:
+        return 0.0, (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
+    e1 = (dx / L, dy / L, dz / L)
+    if is_2d:
+        e2 = (-dy / L, dx / L, 0.0)
+        e3 = (0.0, 0.0, 1.0)
+        if abs(roll_angle_deg) > 1e-9:
+            c = math.cos(math.radians(roll_angle_deg))
+            e2 = (c * e2[0], c * e2[1], 0.0)
+        return L, e1, e2, e3
+
+    if dx * dx + dy * dy < 1e-12 * L * L:
+        # Vertical member: fem3d default e2 = +Y, e3 = e1 x e2 (-X for +Z)
+        v2 = (0.0, 1.0, 0.0)
+        v3 = (
+            e1[1] * v2[2] - e1[2] * v2[1],
+            e1[2] * v2[0] - e1[0] * v2[2],
+            e1[0] * v2[1] - e1[1] * v2[0],
+        )
+    else:
+        # Non-vertical: v3 = normalize(e1 x +Z), v2 = v3 x e1
+        c3 = (e1[1], -e1[0], 0.0)
+        n3 = math.hypot(c3[0], c3[1])
+        v3 = (c3[0] / n3, c3[1] / n3, 0.0)
+        v2 = (
+            v3[1] * e1[2] - v3[2] * e1[1],
+            v3[2] * e1[0] - v3[0] * e1[2],
+            v3[0] * e1[1] - v3[1] * e1[0],
+        )
+    if abs(roll_angle_deg) > 1e-9:
+        ang = math.radians(roll_angle_deg)
+        ca, sa = math.cos(ang), math.sin(ang)
+        e2 = (ca * v2[0] + sa * v3[0], ca * v2[1] + sa * v3[1], ca * v2[2] + sa * v3[2])
+        e3 = (-sa * v2[0] + ca * v3[0], -sa * v2[1] + ca * v3[1], -sa * v2[2] + ca * v3[2])
+    else:
+        e2, e3 = v2, v3
+    return L, e1, e2, e3
+
+
+def _member_shear_and_releases(
+    elem: Any, sec: Any, mat: Any, L: float
+) -> Tuple[float, float, bool, bool, bool, bool]:
+    """Return ``(phi_2, phi_3, rel_i2, rel_j2, rel_i3, rel_j3)`` for a frame/truss element."""
+    if str(getattr(elem, "type", "")).lower() == "truss" or L <= 1e-12:
+        return 0.0, 0.0, True, True, True, True
+    ri = getattr(elem, "release_i", None) or [False] * 6
+    rj = getattr(elem, "release_j", None) or [False] * 6
+    rel_i2 = bool(ri[5]) if len(ri) > 5 else False  # M3 at I (1-2 plane)
+    rel_j2 = bool(rj[5]) if len(rj) > 5 else False  # M3 at J (1-2 plane)
+    rel_i3 = bool(ri[4]) if len(ri) > 4 else False  # M2 at I (1-3 plane)
+    rel_j3 = bool(rj[4]) if len(rj) > 4 else False  # M2 at J (1-3 plane)
+
+    if not getattr(elem, "include_shear_deformation", False) or sec is None or mat is None:
+        return 0.0, 0.0, rel_i2, rel_j2, rel_i3, rel_j3
+
+    sec_type = str(getattr(sec, "type", "")).lower()
+    if sec_type == "rectangular":
+        b, h = float(sec.b), float(sec.h)
+        I3 = b * (h ** 3) / 12.0
+        I2 = h * (b ** 3) / 12.0
+        As2 = (5.0 / 6.0) * b * h
+        As3 = As2
+    elif sec_type == "circular":
+        d = float(sec.d)
+        I3 = math.pi * (d ** 4) / 64.0
+        I2 = I3
+        As2 = 0.9 * math.pi * (d ** 2) / 4.0
+        As3 = As2
+    else:
+        I3 = float(getattr(sec, "I3", 0.0) or 0.0)
+        I2 = float(getattr(sec, "I2", 0.0) or 0.0)
+        As2 = float(getattr(sec, "As2", 0.0) or 0.0)
+        As3 = float(getattr(sec, "As3", 0.0) or 0.0)
+
+    mods = getattr(elem, "stiffness_modifiers", None) or {}
+    I3 *= float(mods.get("I3", 1.0))
+    I2 *= float(mods.get("I2", 1.0))
+    As2 *= float(mods.get("As2", 1.0))
+    As3 *= float(mods.get("As3", 1.0))
+
+    nu = float(getattr(mat, "nu", 0.3) or 0.0)
+    # 12 E I / (G As L^2) = 24 (1 + nu) I / (As L^2)
+    phi_2 = (24.0 * (1.0 + nu) * I3 / (As2 * L * L)) if As2 > 0.0 else 0.0
+    phi_3 = (24.0 * (1.0 + nu) * I2 / (As3 * L * L)) if As3 > 0.0 else 0.0
+    return phi_2, phi_3, rel_i2, rel_j2, rel_i3, rel_j3
+
+
+def _consistent_end_i_force_3d(
+    w_vec: Tuple[float, float, float],
+    s: float,
+    e1: Tuple[float, float, float],
+    e2: Tuple[float, float, float],
+    e3: Tuple[float, float, float],
+    phi_2: float,
+    phi_3: float,
+    rel_i2: bool,
+    rel_j2: bool,
+    rel_i3: bool,
+    rel_j3: bool,
+    *,
+    is_local: bool,
+) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    """Consistent end-node force vectors ``(F_i, F_j)`` in global coordinates for a force ``w_vec`` at ``s``."""
+    if is_local:
+        w1, w2, w3 = w_vec
+        w_glob = (
+            w1 * e1[0] + w2 * e2[0] + w3 * e3[0],
+            w1 * e1[1] + w2 * e2[1] + w3 * e3[1],
+            w1 * e1[2] + w2 * e2[2] + w3 * e3[2],
+        )
+    else:
+        w_glob = w_vec
+        w1 = w_vec[0] * e1[0] + w_vec[1] * e1[1] + w_vec[2] * e1[2]
+        w2 = w_vec[0] * e2[0] + w_vec[1] * e2[1] + w_vec[2] * e2[2]
+        w3 = w_vec[0] * e3[0] + w_vec[1] * e3[1] + w_vec[2] * e3[2]
+
+    f1_i = (1.0 - s) * w1
+    f2_i = _beam_point_end_i_fraction(s, phi_2, rel_i2, rel_j2) * w2
+    f3_i = _beam_point_end_i_fraction(s, phi_3, rel_i3, rel_j3) * w3
+    F_i = (
+        f1_i * e1[0] + f2_i * e2[0] + f3_i * e3[0],
+        f1_i * e1[1] + f2_i * e2[1] + f3_i * e3[1],
+        f1_i * e1[2] + f2_i * e2[2] + f3_i * e3[2],
+    )
+    F_j = (w_glob[0] - F_i[0], w_glob[1] - F_i[1], w_glob[2] - F_i[2])
+    return F_i, F_j
+
+
+def _grav_split_from_end_forces(
+    F_i: Tuple[float, float, float],
+    F_j: Tuple[float, float, float],
+    v_idx: int,
+) -> Tuple[float, float]:
+    """Extract gravity-axis (or total magnitude when purely non-vertical) end-node weights ``(W_i, W_j)``."""
+    tot_v = F_i[v_idx] + F_j[v_idx]
+    if abs(tot_v) > 1e-12:
+        sign = 1.0 if tot_v >= 0.0 else -1.0
+        return max(0.0, sign * F_i[v_idx]), max(0.0, sign * F_j[v_idx])
+    # Fallback for purely non-vertical load included in mass source: split total magnitude along end forces
+    ni = math.sqrt(F_i[0] ** 2 + F_i[1] ** 2 + F_i[2] ** 2)
+    nj = math.sqrt(F_j[0] ** 2 + F_j[1] ** 2 + F_j[2] ** 2)
+    return ni, nj
+
 
 @dataclass
 class MassSourceResult:
@@ -253,54 +428,117 @@ def calculate_mass_source(
                 nodal_masses[nid][1] += m_equiv
                 nodal_masses[nid][2] += m_equiv
 
-        # 4b. Distributed element loads (member self-weight is already counted by include_element_mass)
+        # 4b. Distributed element loads -> lumped to end nodes using the element's consistent static end
+        #     reactions (matching SAP2000's load-to-mass conversion, including Timoshenko shear and end releases).
+        v_idx = 2 if v_axis == "z" else 1
         for dl in lc.element_loads:
             eid = dl.element_id
-            if eid not in element_masses:
+            el_obj = elements_map.get(eid)
+            if el_obj is None:
                 continue
             if ms.include_element_mass and dl.is_self_weight:
                 continue
-
-            if v_axis == "z":
-                w1 = abs(dl.wz) if dl.wz != 0.0 else math.sqrt(dl.wx**2 + dl.wy**2 + dl.wz**2)
-                wz_e = dl.wz_end if dl.wz_end is not None else dl.wz
-                wx_e = dl.wx_end if dl.wx_end is not None else dl.wx
-                wy_e = dl.wy_end if dl.wy_end is not None else dl.wy
-                w2 = abs(wz_e) if wz_e != 0.0 else math.sqrt(wx_e**2 + wy_e**2 + wz_e**2)
-            else:
-                w1 = abs(dl.wy) if dl.wy != 0.0 else math.sqrt(dl.wx**2 + dl.wy**2)
-                wy_e = dl.wy_end if dl.wy_end is not None else dl.wy
-                wx_e = dl.wx_end if dl.wx_end is not None else dl.wx
-                w2 = abs(wy_e) if wy_e != 0.0 else math.sqrt(wx_e**2 + wy_e**2)
-
-            avg_w = 0.5 * (w1 + w2)
-            span_frac = getattr(dl, "end", 1.0) - getattr(dl, "start", 0.0)
-            if avg_w <= 0.0 or span_frac <= 0.0:
+            if el_obj.start_node not in nodes_map or el_obj.end_node not in nodes_map:
                 continue
 
-            w_equiv = (avg_w * span_frac * c_scale) / gravity_accel
-            element_masses[eid] += w_equiv
+            a = float(getattr(dl, "start", 0.0))
+            b = float(getattr(dl, "end", 1.0))
+            span_frac = b - a
+            if span_frac <= 0.0:
+                continue
 
-        # 4b-2. Element point loads
-        for epl in getattr(lc, "element_point_loads", []):
-            eid = epl.element_id
-            if eid not in element_masses:
-                continue
-            if v_axis == "z":
-                f_grav = abs(epl.fz) if epl.fz != 0.0 else math.sqrt(epl.fx**2 + epl.fy**2 + epl.fz**2)
-            else:
-                f_grav = abs(epl.fy) if epl.fy != 0.0 else math.sqrt(epl.fx**2 + epl.fy**2)
-            if f_grav <= 0.0:
-                continue
-            el_obj = next((e for e in model.elements if e.id == eid), None)
-            if not el_obj or el_obj.start_node not in nodes_map or el_obj.end_node not in nodes_map:
-                continue
             ni, nj = nodes_map[el_obj.start_node], nodes_map[el_obj.end_node]
-            L = math.dist((ni.x, ni.y, getattr(ni, "z", 0.0)), (nj.x, nj.y, getattr(nj, "z", 0.0)))
+            L, e1, e2, e3 = _member_local_axes(
+                ni, nj, is_2d=is_2d, roll_angle_deg=float(getattr(el_obj, "roll_angle", 0.0) or 0.0)
+            )
             if L <= 1e-12:
                 continue
-            m_equiv = (f_grav * c_scale) / gravity_accel
-            element_masses[eid] += m_equiv / L
+
+            sec = sections_map.get(getattr(el_obj, "section_id", None))
+            mat = materials_map.get(getattr(sec, "material_id", None)) if sec is not None else None
+            phi_2, phi_3, rel_i2, rel_j2, rel_i3, rel_j3 = _member_shear_and_releases(el_obj, sec, mat, L)
+
+            is_loc = bool(getattr(dl, "is_local", False))
+            if is_loc:
+                w_start = (float(dl.w1), float(dl.w2), float(dl.w3))
+                w_end = (
+                    float(dl.w1_end) if dl.w1_end is not None else w_start[0],
+                    float(dl.w2_end) if dl.w2_end is not None else w_start[1],
+                    float(dl.w3_end) if dl.w3_end is not None else w_start[2],
+                )
+            else:
+                w_start = (float(dl.wx), float(dl.wy), 0.0 if is_2d else float(dl.wz))
+                w_end = (
+                    float(dl.wx_end) if dl.wx_end is not None else w_start[0],
+                    float(dl.wy_end) if dl.wy_end is not None else w_start[1],
+                    0.0 if is_2d else (float(dl.wz_end) if dl.wz_end is not None else w_start[2]),
+                )
+
+            if all(abs(v) <= 1e-15 for v in w_start + w_end):
+                continue
+
+            # Exact 3-point Gauss-Legendre integration over [a, b] (integrand degree <= 4)
+            Fi_sum = [0.0, 0.0, 0.0]
+            Fj_sum = [0.0, 0.0, 0.0]
+            half_len = 0.5 * span_frac * L
+            for xi, gw in zip(_GL3_XI, _GL3_W):
+                t = 0.5 * (xi + 1.0)
+                s = a + t * span_frac
+                w_s = (
+                    w_start[0] + t * (w_end[0] - w_start[0]),
+                    w_start[1] + t * (w_end[1] - w_start[1]),
+                    w_start[2] + t * (w_end[2] - w_start[2]),
+                )
+                fi_s, fj_s = _consistent_end_i_force_3d(
+                    w_s, s, e1, e2, e3, phi_2, phi_3, rel_i2, rel_j2, rel_i3, rel_j3, is_local=is_loc
+                )
+                wt = gw * half_len
+                for k in range(3):
+                    Fi_sum[k] += wt * fi_s[k]
+                    Fj_sum[k] += wt * fj_s[k]
+
+            wi_grav, wj_grav = _grav_split_from_end_forces(
+                (Fi_sum[0], Fi_sum[1], Fi_sum[2]),
+                (Fj_sum[0], Fj_sum[1], Fj_sum[2]),
+                v_idx,
+            )
+            if wi_grav > 0.0:
+                _add_node_mass(el_obj.start_node, (wi_grav * c_scale) / gravity_accel)
+            if wj_grav > 0.0:
+                _add_node_mass(el_obj.end_node, (wj_grav * c_scale) / gravity_accel)
+
+        # 4b-2. Element point loads -> lumped to end nodes using consistent static end reactions
+        for epl in getattr(lc, "element_point_loads", []):
+            eid = epl.element_id
+            el_obj = elements_map.get(eid)
+            if el_obj is None:
+                continue
+            if el_obj.start_node not in nodes_map or el_obj.end_node not in nodes_map:
+                continue
+            ni, nj = nodes_map[el_obj.start_node], nodes_map[el_obj.end_node]
+            L, e1, e2, e3 = _member_local_axes(
+                ni, nj, is_2d=is_2d, roll_angle_deg=float(getattr(el_obj, "roll_angle", 0.0) or 0.0)
+            )
+            if L <= 1e-12:
+                continue
+
+            is_loc = bool(getattr(epl, "is_local", False))
+            p_vec = (float(epl.fx), float(epl.fy), 0.0 if (is_2d and not is_loc) else float(epl.fz))
+            if all(abs(v) <= 1e-15 for v in p_vec):
+                continue
+
+            sec = sections_map.get(getattr(el_obj, "section_id", None))
+            mat = materials_map.get(getattr(sec, "material_id", None)) if sec is not None else None
+            phi_2, phi_3, rel_i2, rel_j2, rel_i3, rel_j3 = _member_shear_and_releases(el_obj, sec, mat, L)
+            s = float(getattr(epl, "position", 0.5))
+            fi_p, fj_p = _consistent_end_i_force_3d(
+                p_vec, s, e1, e2, e3, phi_2, phi_3, rel_i2, rel_j2, rel_i3, rel_j3, is_local=is_loc
+            )
+            wi_grav, wj_grav = _grav_split_from_end_forces(fi_p, fj_p, v_idx)
+            if wi_grav > 0.0:
+                _add_node_mass(el_obj.start_node, (wi_grav * c_scale) / gravity_accel)
+            if wj_grav > 0.0:
+                _add_node_mass(el_obj.end_node, (wj_grav * c_scale) / gravity_accel)
 
         # 4b-3. Uniform loads on shell elements (shell self-weight is already counted by include_element_mass)
         for sl in getattr(lc, "shell_loads", []):

@@ -24,7 +24,9 @@ from struct_core import (
 def material_weight_density(material: object, units: Units) -> float:
     """
     Weight per unit volume of ``material`` in ``units``: its ``unit_weight``, else its mass density ``rho`` times
-    gravity. A material with neither has no self-weight to compute: ``ValueError`` names it (no density is assumed).
+    gravity. An explicit zero density (``unit_weight=0.0`` with ``rho=0.0`` or ``None``) returns ``0.0`` for
+    massless elements with lumped joint masses. A material with no density specified (``unit_weight=None`` and
+    ``rho=0.0``/``None``) raises ``ValueError`` (no density is assumed).
     """
     unit_weight = getattr(material, "unit_weight", None)
     if unit_weight is not None and float(unit_weight) > 0.0:
@@ -32,6 +34,8 @@ def material_weight_density(material: object, units: Units) -> float:
     rho = getattr(material, "rho", None)
     if rho is not None and float(rho) > 0.0:
         return float(rho) * units.consistent_mass_factor * units.gravity_acceleration
+    if unit_weight is not None and float(unit_weight) == 0.0 and (rho is None or float(rho) == 0.0):
+        return 0.0
     name = getattr(material, "id", None) or type(material).__name__
     raise ValueError(f"Material {name!r} has no density (unit_weight or rho); its self-weight cannot be computed.")
 
@@ -65,6 +69,8 @@ def _solver_weight_density(material: object, gravity_accel: float) -> float:
     rho = getattr(material, "rho", None)
     if rho is not None and float(rho) > 0.0:
         return float(rho) * gravity_accel
+    if unit_weight is not None and float(unit_weight) == 0.0 and (rho is None or float(rho) == 0.0):
+        return 0.0
     raise ValueError(f"Material {type(material).__name__} has no density (unit_weight or rho); its self-weight cannot "
                      f"be computed.")
 

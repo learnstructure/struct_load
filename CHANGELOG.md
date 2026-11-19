@@ -27,6 +27,13 @@ All notable changes to `struct_load` are recorded in this file. The format follo
   frame element, with its `weight` and `mass` modifiers (`BeamElement.stiffness_modifiers`).
 
 ### Fixed
+- `calculate_mass_source` now lumps member distributed and point loads (`DistributedLoad`, `ElementPointLoad`) to
+  end nodes using the element's consistent static end reactions (including Timoshenko shear deformation and end
+  releases, reducing to the simple-beam lever rule when moment-released), matching SAP2000's load-to-mass conversion
+  instead of splitting asymmetric loads 50/50. Test: `tests/test_mass_source.py`.
+- `material_weight_density` and `_solver_weight_density` now allow explicit zero density (`unit_weight=0.0` and
+  `rho=0.0`, returning `0.0` for massless elements with lumped joint masses) while still refusing materials with
+  unspecified density (`unit_weight=None` and `rho=0.0`). Test: `tests/test_mass_source.py`.
 - `calculate_mass_source` now converts user-assigned `Node.mass` and element `mass` from `units.mass` to consistent
   solver mass units (`units.consistent_mass_factor`), matching `fem2d`, `fem3d`, and `self_weight`. Test:
   `tests/test_mass_source.py`.

@@ -90,16 +90,13 @@ def test_mass_source_load_combinations(sample_2d_portal_model):
     expected_mass = 157.5 / 9.80665
     assert res.total_mass == pytest.approx(expected_mass, rel=1e-4)
 
-    # Check beam distributed extra mass
-    # w_dead = 20 kN/m, w_live_scaled = 2.5 kN/m -> w_tot = 22.5 kN/m
-    # mass per length = 22.5 / 9.80665 = 2.2943 tonne/m
-    assert res.element_masses["B1"] == pytest.approx(22.5 / 9.80665, rel=1e-4)
-
-    # Check nodal masses at N3 and N4
-    # P_tot per node = 10 (dead) + 0.25 * 5 (live) = 11.25 kN
-    # m_node = 11.25 / 9.80665 = 1.1471 tonne
-    assert res.nodal_masses["N3"][0] == pytest.approx(11.25 / 9.80665, rel=1e-4)
-    assert res.nodal_masses["N4"][0] == pytest.approx(11.25 / 9.80665, rel=1e-4)
+    # Member distributed loads are lumped to end nodes via consistent static end reactions
+    # (for symmetric uniform loads: 50% to N3, 50% to N4).
+    # w_tot = 22.5 kN/m * 6 m = 135 kN -> 67.5 kN at N3 and 67.5 kN at N4.
+    # Point loads add 10 + 0.25 * 5 = 11.25 kN at each node -> 78.75 kN / g per node.
+    assert res.element_masses["B1"] == pytest.approx(0.0, abs=1e-12)
+    assert res.nodal_masses["N3"][0] == pytest.approx(78.75 / 9.80665, rel=1e-4)
+    assert res.nodal_masses["N4"][0] == pytest.approx(78.75 / 9.80665, rel=1e-4)
 
 
 def test_mass_source_with_element_self_mass(sample_2d_portal_model):
@@ -328,4 +325,99 @@ def test_nodal_added_mass_converted_to_consistent_units():
     assert res.nodal_masses["2"] == pytest.approx((10.0, 10.0, 10.0), rel=1e-9)
     assert res.total_mass == pytest.approx(10.0, rel=1e-9)
     assert res.total_seismic_weight == pytest.approx(10.0 * 9.80665, rel=1e-9)
+
+
+def test_asymmetric_member_loads_lumped_by_consistent_end_reactions():
+    """Member loads in a MassSource lump to end nodes using consistent static end reactions (matching SAP2000):
+    fixed-fixed Euler-Bernoulli (13/16 : 3/16), fixed-fixed Timoshenko, pinned-pinned lever rule (3/4 : 1/4),
+    and off-center element point loads."""
+    from struct_core import ConcreteMaterial, ElementPointLoad, Support
+
+    g = 9.80665
+
+    def _run(shear: bool, rel_i=None, rel_j=None, dl=None, epl=None):
+        model = StructuralModel(
+            dimension="3D",
+            vertical_axis="Z",
+            units="kN, m",
+            nodes=[Node(id="1", x=0.0, y=0.0, z=3.5), Node(id="2", x=6.0, y=0.0, z=3.5)],
+            supports=[Support.fixed_3d("1"), Support.fixed_3d("2")],
+            materials=[ConcreteMaterial(id="C30", E=25.0e6, nu=0.2, fc=30.0e3, unit_weight=24.0)],
+            sections=[RectangularSection(id="S1", material_id="C30", b=0.4, h=0.4)],
+            elements=[
+                BeamElement(
+                    id="B1",
+                    start_node="1",
+                    end_node="2",
+                    section_id="S1",
+                    include_shear_deformation=shear,
+                    release_i=rel_i or [False] * 6,
+                    release_j=rel_j or [False] * 6,
+                )
+            ],
+            load_cases=[LoadCase(id="SDL", element_loads=dl or [], element_point_loads=epl or [])],
+        )
+        ms = MassSource(
+            id="MS",
+            include_element_mass=False,
+            include_added_mass=False,
+            factors=[MassSourceFactor(load_case_id="SDL", factor=1.0)],
+        )
+        return calculate_mass_source(model, mass_source=ms, units="kN, m")
+
+    # 1. Fixed-fixed Euler-Bernoulli partial load on [0, 0.5]: 13/16 at node 1, 3/16 at node 2
+    r_eb = _run(False, dl=[DistributedLoad(element_id="B1", wz=-30.0, start=0.0, end=0.5)])
+    m_tot = 90.0 / g
+    assert r_eb.nodal_masses["1"][0] == pytest.approx((13.0 / 16.0) * m_tot, rel=1e-12)
+    assert r_eb.nodal_masses["2"][0] == pytest.approx((3.0 / 16.0) * m_tot, rel=1e-12)
+
+    # 2. Fixed-fixed Timoshenko (phi = 0.0128) partial load on [0, 0.5]
+    phi = 0.0128
+    r_tim = _run(True, dl=[DistributedLoad(element_id="B1", wz=-30.0, start=0.0, end=0.5)])
+    f1_tim = (13.0 + 12.0 * phi) / (16.0 * (1.0 + phi))
+    assert r_tim.nodal_masses["1"][0] == pytest.approx(f1_tim * m_tot, rel=1e-12)
+    assert r_tim.nodal_masses["2"][0] == pytest.approx((1.0 - f1_tim) * m_tot, rel=1e-12)
+
+    # 3. Pinned-pinned (M3 released at both ends): exact simple-beam lever rule 0.75 / 0.25
+    rel_pin = [False, False, False, False, True, True]
+    r_pin = _run(True, rel_i=rel_pin, rel_j=rel_pin, dl=[DistributedLoad(element_id="B1", wz=-30.0, start=0.0, end=0.5)])
+    assert r_pin.nodal_masses["1"][0] == pytest.approx(0.75 * m_tot, rel=1e-12)
+    assert r_pin.nodal_masses["2"][0] == pytest.approx(0.25 * m_tot, rel=1e-12)
+
+    # 4. Off-center ElementPointLoad at s=0.25 (Timoshenko fixed-fixed)
+    r_pt = _run(True, epl=[ElementPointLoad(element_id="B1", position=0.25, fz=-90.0)])
+    f1_pt = (0.75 ** 2 * 1.5 + 0.75 * phi) / (1.0 + phi)
+    assert r_pt.nodal_masses["1"][0] == pytest.approx(f1_pt * m_tot, rel=1e-12)
+    assert r_pt.nodal_masses["2"][0] == pytest.approx((1.0 - f1_pt) * m_tot, rel=1e-12)
+
+
+def test_explicit_zero_density_material_allowed_while_missing_density_refused():
+    """Materials with explicit unit_weight=0.0 and rho=0.0 represent massless elements (with lumped joint masses)
+    and return zero self-mass/self-weight; materials with unit_weight=None and rho=0.0 are still refused."""
+    from struct_core import Support
+    from struct_load.engine.self_weight import calculate_self_weight, material_weight_density
+    from struct_core import parse_units
+
+    units = parse_units("kN, m")
+    mat_zero = ElasticMaterial(id="MASSLESS", E=25e6, unit_weight=0.0, rho=0.0)
+    assert material_weight_density(mat_zero, units) == 0.0
+
+    mat_missing = ElasticMaterial(id="UNSPEC", E=25e6)  # unit_weight=None, rho=0.0 default
+    with pytest.raises(ValueError, match="has no density"):
+        material_weight_density(mat_missing, units)
+
+    model = StructuralModel(
+        units="kN, m",
+        nodes=[Node(id="1", x=0.0, y=0.0, z=0.0), Node(id="2", x=4.0, y=0.0, z=0.0, mass=5000.0)],
+        materials=[mat_zero],
+        sections=[RectangularSection(id="S", material_id="MASSLESS", b=0.3, h=0.3)],
+        elements=[BeamElement(id="E1", start_node="1", end_node="2", section_id="S")],
+        supports=[Support.fixed_3d("1")],
+    )
+    sw = calculate_self_weight(model, units="kN, m")
+    assert sw.element_loads == []
+    ms = MassSource(id="MS", include_element_mass=True, include_added_mass=True, factors=[])
+    res = calculate_mass_source(model, mass_source=ms, units="kN, m")
+    assert res.total_mass == pytest.approx(5.0, rel=1e-12)
+
 
