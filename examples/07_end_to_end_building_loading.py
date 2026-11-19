@@ -156,14 +156,14 @@ def run_pipeline():
     generator = LoadGenerator(units="kN, m")
 
     # 3. Apply Gravity Loads (Dead + Live)
-    # Tributary width: 5.0 m (spacing between frames in Y)
+    # Two-way floor panels on the 3D frame (6.0 m x 5.0 m)
     # Superimposed dead: 1.5 kPa (finishes, ceilings, MEP)
     # Occupancy: "office" (ASCE 7: 2.4 kPa + 0.72 kPa partition allowance = 3.12 kPa)
     print("\n2. Applying Gravity Loads (ASCE 7-16 Table 4.3-1):")
     dead_case, live_case = generator.apply_gravity_loads(
         model_or_project=project,
         occupancy="office",
-        tributary_width=5.0,
+        two_way=True,
         superimposed_dead=1.5,
         include_self_weight=True,
     )
@@ -177,7 +177,7 @@ def run_pipeline():
     roof_cases = generator.apply_roof_loads(
         model_or_project=project,
         ground_snow_load=1.2,
-        tributary_width=5.0,
+        two_way=True,
     )
     for k, rc in roof_cases.items():
         print(f"   - Roof Case '{rc.id}': {len(rc.element_loads)} roof beams loaded")
