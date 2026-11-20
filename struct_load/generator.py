@@ -545,7 +545,7 @@ class LoadGenerator:
                 elem = next((e for e in model.elements if e.id == dl.element_id), None)
                 if not elem:
                     continue
-                if marks_dead:
+                if marks_dead and getattr(dl, "is_self_weight", False):
                     loaded_elements.add(elem.id)
                 length = get_beam_length(elem, nodes_map)
 

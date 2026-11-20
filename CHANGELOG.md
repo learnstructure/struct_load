@@ -6,6 +6,13 @@ All notable changes to `struct_load` are recorded in this file. The format follo
 
 ## [Unreleased]
 
+### Fixed
+- `LoadGenerator.calculate_model_seismic_weight`: checks `getattr(dl, "is_self_weight", False)` before marking an
+  element as already carrying materialized self-weight, matching `calculate_mass_source`. Previously, a superimposed
+  dead load (`is_self_weight=False`) on a beam caused `calculate_model_seismic_weight` to skip the beam's unmaterialized
+  self-weight when `include_self_weight=True`, understating the effective seismic weight (by 17.5% on benchmark `C02`'s
+  model when computed without a mass source). Test: `tests/test_generator.py`.
+
 ### Changed
 - **Named stories and explicit base elevation (ROADMAP §1a):** replaced `detect_story_elevations` with `detect_stories`
   (returning `List[Story]` for levels above the base only) and added `resolve_base_elevation` (using

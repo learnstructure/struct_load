@@ -131,3 +131,62 @@ def test_generate_combinations_reports_omitted_load_cases():
         ("WX2", "wind"),
     ):
         assert any(case_id in m and kind in m for m in gen.messages), f"Missing message for {case_id} ({kind}): {text}"
+
+
+def test_calculate_model_seismic_weight_includes_beam_self_weight_with_superdead():
+    """Superimposed dead loads (is_self_weight=False) on beams must not suppress beam self-weight."""
+    from struct_core import DistributedLoad, LoadCase, Story
+    from struct_load import apply_self_weight, calculate_mass_source, create_asce7_mass_source
+
+    model = StructuralModel(
+        dimension="3D",
+        vertical_axis="Z",
+        units="kN, m",
+        nodes=[
+            Node(id="1", x=0.0, y=0.0, z=0.0),
+            Node(id="2", x=6.0, y=0.0, z=0.0),
+            Node(id="3", x=0.0, y=0.0, z=3.5),
+            Node(id="4", x=6.0, y=0.0, z=3.5),
+        ],
+        supports=[Support.fixed_3d("1"), Support.fixed_3d("2")],
+        materials=[ElasticMaterial(id="C28", E=25e6, nu=0.2, unit_weight=24.0)],
+        sections=[
+            RectangularSection(id="COL", material_id="C28", b=0.4, h=0.4),
+            RectangularSection(id="BM", material_id="C28", b=0.3, h=0.5),
+        ],
+        elements=[
+            BeamElement(id="C1", start_node="1", end_node="3", section_id="COL"),
+            BeamElement(id="C2", start_node="2", end_node="4", section_id="COL"),
+            BeamElement(id="B1", start_node="3", end_node="4", section_id="BM"),
+        ],
+        base_elevation=0.0,
+        stories=[Story(name="Roof", elevation=3.5)],
+        load_cases=[
+            LoadCase(id="DEAD", load_type="dead", include_self_weight=True),
+            LoadCase(
+                id="SuperDead",
+                load_type="super_dead",
+                include_self_weight=False,
+                element_loads=[DistributedLoad(element_id="B1", wz=-10.0, is_self_weight=False)],
+            ),
+        ],
+    )
+    gen = LoadGenerator(units="kN, m")
+    w_stories = gen.calculate_model_seismic_weight(model, [3.5], base_elevation=0.0)
+    # 2 columns above mid-height: 2 * 24.0 * 0.16 * (3.5 / 2) = 13.44 kN
+    # 1 beam self-weight: 24.0 * 0.15 * 6.0 = 21.60 kN
+    # SuperDead on beam: 10.0 * 6.0 = 60.00 kN -> total = 95.04 kN
+    expected = 13.44 + 21.60 + 60.00
+    assert w_stories == [pytest.approx(expected, rel=1e-6)]
+
+    ms = create_asce7_mass_source(model, include_element_mass=True)
+    ms_res = calculate_mass_source(model, mass_source=ms, units="kN, m", base_elevation=0.0)
+    assert ms_res.story_weights[3.5] == pytest.approx(expected, rel=1e-6)
+    assert ms_res.total_seismic_weight == pytest.approx(expected + 13.44, rel=1e-6)
+
+    # Also verify materialized self-weight (is_self_weight=True) is not double-counted
+    model_mat = model.model_copy(deep=True)
+    apply_self_weight(model_mat, target_case_id="DEAD", units="kN, m")
+    w_mat = gen.calculate_model_seismic_weight(model_mat, [3.5], base_elevation=0.0)
+    assert w_mat == [pytest.approx(expected, rel=1e-6)]
+
