@@ -17,7 +17,7 @@ from struct_core import (
 
 from .geometry import (
     detect_model_dimensionality,
-    detect_story_elevations,
+    detect_stories,
     get_beam_elevation,
     get_beam_length,
     get_beam_span_and_orientation,
@@ -150,7 +150,7 @@ def distribute_two_way_slab(
 def _distribute_3d_floor_panels(
     model: StructuralModel,
     pressure: float,
-    story_elevations: List[float],
+    stories: Sequence[Any],
     direction: str = "-z",
     design_action: str = "shear",
     tolerance: float = 0.05,
@@ -167,7 +167,8 @@ def _distribute_3d_floor_panels(
     loaded_areas_by_elev: Dict[float, float] = {}
     unloaded_beams: List[Union[int, str]] = []
 
-    for elev in story_elevations:
+    for story in stories:
+        elev = float(story.elevation)
         elev_beams = []
         for elem in getattr(model, "elements", []):
             elem_type = str(getattr(elem, "type", "")).lower()
@@ -281,7 +282,7 @@ def _distribute_3d_floor_panels(
 def _distribute_3d_one_way(
     model: StructuralModel,
     pressure: float,
-    story_elevations: Sequence[float],
+    stories: Sequence[Any],
     one_way_span: str,
     direction: str = "-z",
     tolerance: float = 0.05,
@@ -301,7 +302,7 @@ def _distribute_3d_one_way(
         raise ValueError(f"one_way_span must be 'x' or 'y', got {one_way_span!r}")
 
     nodes_map = {n.id: n for n in model.nodes}
-    elevs = list(story_elevations)
+    elevs = [float(s.elevation) for s in stories]
     beam_loads: Dict[Any, float] = {}
 
     for elev in elevs:
@@ -365,7 +366,7 @@ def apply_floor_load_to_frame(
     tributary_width: Optional[float] = None,
     target_case_id: str = "FloorLoad",
     case_name: Optional[str] = None,
-    story_elevations: Optional[List[float]] = None,
+    stories: Optional[List[Any]] = None,
     direction: Optional[str] = None,
     two_way: bool = False,
     one_way_span: Optional[Literal["x", "y"]] = None,
@@ -392,9 +393,9 @@ def apply_floor_load_to_frame(
         ID for the resulting LoadCase.
     case_name : str, optional
         Human-readable name for the LoadCase.
-    story_elevations : List[float], optional
-        Elevations (Y coordinates for 2D, Z for 3D) of floor beams.
-        If None, automatically detected above ground level.
+    stories : List[Story], optional
+        Named floor stories (Y coordinates for 2D, Z for 3D).
+        If None, automatically detected above base.
     direction : str, optional
         Direction of gravity: '-z' for 3D, '-y' for 2D. Inferred if None.
     two_way : bool
@@ -417,7 +418,8 @@ def apply_floor_load_to_frame(
     if direction is None:
         direction = "-z" if (is_3d or v_axis == "z") else "-y"
 
-    elevs = story_elevations or detect_story_elevations(model, tolerance=tolerance)
+    story_list = list(stories) if stories else detect_stories(model, tolerance=tolerance)
+    elevs = [float(s.elevation) for s in story_list]
 
     if load_type is None:
         cid_lower = str(target_case_id).lower()
@@ -433,7 +435,7 @@ def apply_floor_load_to_frame(
             panel_loads, loaded_areas, unloaded = _distribute_3d_floor_panels(
                 model=model,
                 pressure=pressure,
-                story_elevations=elevs,
+                stories=story_list,
                 direction=direction,
                 tolerance=tolerance,
                 allow_partial_floor=allow_partial_floor,
@@ -471,7 +473,7 @@ def apply_floor_load_to_frame(
             one_way_loads = _distribute_3d_one_way(
                 model=model,
                 pressure=pressure,
-                story_elevations=elevs,
+                stories=story_list,
                 one_way_span=one_way_span,
                 direction=direction,
                 tolerance=tolerance,
@@ -709,13 +711,14 @@ def distribute_area_loads_to_beams(
 
             elif elev is not None and getattr(al, "tributary_width", None) is not None:
                 # Area load with story elevation and tributary width
+                from struct_core import Story
                 trib_w = float(al.tributary_width)
                 case_proxy = apply_floor_load_to_frame(
                     model=model,
                     pressure=pressure,
                     tributary_width=trib_w,
                     target_case_id=lc.id,
-                    story_elevations=[float(elev)],
+                    stories=[Story(name=f"Elev_{float(elev):g}", elevation=float(elev))],
                     tolerance=tolerance,
                 )
                 new_element_loads.extend(case_proxy.element_loads)

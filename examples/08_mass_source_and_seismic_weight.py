@@ -90,13 +90,14 @@ def build_3story_building():
     part_loads = [DistributedLoad(element_id=bid, wz=-5.0) for bid in beam_ids]
     lc_partition = LoadCase(id="PARTITION", name="Floor Partitions", element_loads=part_loads)
 
+    from struct_core import Story
     model = StructuralModel(
         nodes=nodes,
         elements=elements,
         materials=[mat_conc],
         sections=[sec_col, sec_beam],
         load_cases=[lc_dead, lc_office_live, lc_storage, lc_partition],
-        story_elevations=[3.5, 7.0, 10.5],
+        stories=[Story(name="Story1", elevation=3.5), Story(name="Story2", elevation=7.0), Story(name="Story3", elevation=10.5)],
         units="kN, m",
     )
     return model

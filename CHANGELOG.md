@@ -6,6 +6,19 @@ All notable changes to `struct_load` are recorded in this file. The format follo
 
 ## [Unreleased]
 
+### Changed
+- **Named stories and explicit base elevation (ROADMAP §1a):** replaced `detect_story_elevations` with `detect_stories`
+  (returning `List[Story]` for levels above the base only) and added `resolve_base_elevation` (using
+  `model.base_elevation` when set, or inferring from the lowest supported nodes with a message). Renamed
+  `story_elevations` to `stories` everywhere, including `calculate_seismic_elf`, `calculate_wind_forces`,
+  `LoadGenerator.apply_lateral_seismic`, `LoadGenerator.apply_lateral_wind`, and floor/mass helpers. Both
+  `calculate_seismic_elf` and `calculate_wind_forces` now take `stories: List[Story]` and a required keyword-only
+  `base_elevation: float` (no default of 0), measuring heights `h_x = story.elevation - base_elevation` per ASCE 7-22
+  §12.8.3. Unified restrained-base mass exclusion across `calculate_mass_source` and
+  `LoadGenerator.calculate_model_seismic_weight` (whether `base_elevation` is explicit or inferred from lowest
+  supports), matching ETABS 23 and SAP2000 27 effective seismic weight. Tests: `tests/test_codes.py`,
+  `tests/test_geometry_3d.py`, `tests/test_mass_source.py`.
+
 ### Added
 - `LoadGenerator.messages`: `generate_combinations` now records every load case left out of the generated ASCE 7-22
   combinations (`other`, `temperature`, `soil`, `fluid`, `partition`, and extra cases beyond one per direction for

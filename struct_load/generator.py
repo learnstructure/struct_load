@@ -16,6 +16,7 @@ from struct_core import (
     Node,
     PointLoad,
     Project,
+    Story,
     StructuralModel,
     Units,
     conversion_factor,
@@ -41,10 +42,11 @@ from .codes.asce7_wind import (
 )
 from .engine.geometry import (
     detect_model_dimensionality,
-    detect_story_elevations,
+    detect_stories,
     get_beam_elevation,
     get_beam_length,
     is_horizontal_beam,
+    resolve_base_elevation,
 )
 from .engine.mass_source import calculate_mass_source
 from .engine.self_weight import (
@@ -78,6 +80,7 @@ class LoadGenerator:
             from model or project units, or defaults to 'kN, m'.
         """
         self._units = parse_units(units) if units is not None else None
+        self.messages: List[str] = []
         self.messages: List[str] = []
 
     @property
@@ -285,12 +288,12 @@ class LoadGenerator:
         is_3d = detect_model_dimensionality(model) == "3d"
         direction = "-z" if (is_3d or v_axis == "z") else "-y"
 
-        elevations = self.detect_story_elevations(model)
-        if not elevations:
+        stories = self.detect_stories(model)
+        if not stories:
             raise ValueError(
-                "No story elevations detected in model. Ensure horizontal beams or floor nodes exist."
+                "No stories detected in model. Ensure horizontal beams or floor nodes exist."
             )
-        roof_elevation = elevations[-1]
+        roof_story = stories[-1]
 
         if two_way is None:
             use_two_way = is_3d and (one_way_span is None and tributary_width is None)
@@ -325,7 +328,7 @@ class LoadGenerator:
                 two_way=use_two_way,
                 target_case_id=snow_case_id,
                 case_name="Snow Load (ASCE 7 Ch 7)",
-                story_elevations=[roof_elevation],
+                stories=[roof_story],
                 direction=direction,
             )
             model.load_cases = [lc for lc in model.load_cases if lc.id != snow_case_id]
@@ -351,7 +354,7 @@ class LoadGenerator:
             two_way=use_two_way,
             target_case_id=roof_live_case_id,
             case_name="Roof Live Load (ASCE 7 Sec 4.5)",
-            story_elevations=[roof_elevation],
+            stories=[roof_story],
             direction=direction,
         )
         model.load_cases = [lc for lc in model.load_cases if lc.id != roof_live_case_id]
@@ -395,6 +398,7 @@ class LoadGenerator:
         include_general_live: bool = False,
         general_live_cases: Optional[List[str]] = None,
         general_live_factor: float = 0.0,
+        base_elevation: Optional[float] = None,
     ) -> List[float]:
         """
         Compute deterministic story seismic weights W_i per ASCE 7-22 Section 12.7.2:
@@ -405,6 +409,9 @@ class LoadGenerator:
         3. Partitions: 100% (factor = 1.0) per Section 12.7.2 Item 2.
         4. Permanent operating equipment: 100% (factor = 1.0) per Section 12.7.2 Item 3.
         5. Snow load: 15% where flat roof snow load Pf > 45 psf (2.16 kN/m^2) per Section 12.7.2 Item 4.
+
+        Mass lumped at the restrained base carries no seismic inertia force and is excluded from
+        above-base story weights (unless ``base_elevation`` is itself included in ``elevations``).
         """
         from struct_core import vertical_axis as get_vertical_axis
         v_axis = get_vertical_axis(model)
@@ -416,13 +423,29 @@ class LoadGenerator:
         threshold_snow = 2.16 * conversion_factor("kN, m", active_units, "pressure")
         snow_factor = 0.15 if flat_roof_snow_pressure > (threshold_snow - 1e-6) else 0.0
 
+        base_elev_val: Optional[float] = None
+        if base_elevation is not None:
+            base_elev_val = float(base_elevation)
+        elif getattr(model, "base_elevation", None) is not None:
+            base_elev_val = float(model.base_elevation)
+        elif getattr(model, "supports", None):
+            base_elev_val = resolve_base_elevation(model, messages=self.messages)
+
+        exclude_base_bucket = (
+            base_elev_val is not None
+            and not any(abs(e - base_elev_val) <= 1e-9 for e in elevations)
+        )
+
         n_stories = len(elevations)
         story_weights = [0.0] * n_stories
 
-        # Helper to find closest story index
-        def _closest_story_idx(z_val: float) -> int:
+        # Helper to find closest story index (returns None when weight lands at the restrained base)
+        def _closest_story_idx(z_val: float) -> Optional[int]:
             diffs = [abs(z_val - elev) for elev in elevations]
-            return int(diffs.index(min(diffs)))
+            min_diff = min(diffs)
+            if exclude_base_bucket and abs(z_val - base_elev_val) <= min_diff + 1e-12:
+                return None
+            return int(diffs.index(min_diff))
 
         all_cases = {lc.id: lc for lc in model.load_cases}
 
@@ -510,7 +533,9 @@ class LoadGenerator:
             for nid, frac in shares:
                 node = nodes_map[nid]
                 node_z = getattr(node, "z", 0.0) if v_axis == "z" else node.y
-                story_weights[_closest_story_idx(node_z)] += total * frac
+                idx = _closest_story_idx(node_z)
+                if idx is not None:
+                    story_weights[idx] += total * frac
 
         for lc, c_scale, marks_dead in weighted_cases:
             if c_scale <= 0.0:
@@ -535,7 +560,8 @@ class LoadGenerator:
                 if is_horizontal_beam(elem, nodes_map, is_3d=is_3d, tolerance=tolerance, vertical_axis=v_axis):
                     elev = get_beam_elevation(elem, nodes_map, is_3d=is_3d, vertical_axis=v_axis)
                     idx = _closest_story_idx(elev)
-                    story_weights[idx] += load_mag
+                    if idx is not None:
+                        story_weights[idx] += load_mag
                 else:
                     # Vertical or inclined member: split between top and bottom story
                     n_start = nodes_map[elem.start_node]
@@ -544,8 +570,10 @@ class LoadGenerator:
                     z2 = getattr(n_end, "z", 0.0) if v_axis == "z" else n_end.y
                     idx1 = _closest_story_idx(z1)
                     idx2 = _closest_story_idx(z2)
-                    story_weights[idx1] += 0.5 * load_mag
-                    story_weights[idx2] += 0.5 * load_mag
+                    if idx1 is not None:
+                        story_weights[idx1] += 0.5 * load_mag
+                    if idx2 is not None:
+                        story_weights[idx2] += 0.5 * load_mag
 
             # Uniform loads on shell elements (load per area x element area)
             for sl in getattr(lc, "shell_loads", []):
@@ -567,7 +595,8 @@ class LoadGenerator:
                 if p_vert < 1e-6:
                     p_vert = math.sqrt(pl.fx ** 2 + pl.fy ** 2 + pl.fz ** 2)
                 idx = _closest_story_idx(node_z)
-                story_weights[idx] += p_vert * c_scale
+                if idx is not None:
+                    story_weights[idx] += p_vert * c_scale
 
         # 2. Check if self-weight was already accounted for in loaded_elements.
         # If not, add section self-weight for remaining elements
@@ -603,7 +632,8 @@ class LoadGenerator:
             if is_horizontal_beam(elem, nodes_map, is_3d=is_3d, tolerance=tolerance, vertical_axis=v_axis):
                 elev = get_beam_elevation(elem, nodes_map, is_3d=is_3d, vertical_axis=v_axis)
                 idx = _closest_story_idx(elev)
-                story_weights[idx] += total_w
+                if idx is not None:
+                    story_weights[idx] += total_w
             else:
                 n_start = nodes_map[elem.start_node]
                 n_end = nodes_map[elem.end_node]
@@ -611,8 +641,10 @@ class LoadGenerator:
                 z2 = getattr(n_end, "z", 0.0) if v_axis == "z" else n_end.y
                 idx1 = _closest_story_idx(z1)
                 idx2 = _closest_story_idx(z2)
-                story_weights[idx1] += 0.5 * total_w
-                story_weights[idx2] += 0.5 * total_w
+                if idx1 is not None:
+                    story_weights[idx1] += 0.5 * total_w
+                if idx2 is not None:
+                    story_weights[idx2] += 0.5 * total_w
 
         # 3. Self-weight of shell elements not already carried by a dead case (CSI Analysis Reference Manual §10.12)
         if shell_trib:
@@ -628,7 +660,8 @@ class LoadGenerator:
         params: Optional[SeismicParameters] = None,
         direction: str = "both",
         seismic_case_id: Optional[str] = None,
-        story_elevations: Optional[List[float]] = None,
+        stories: Optional[List[Story]] = None,
+        base_elevation: Optional[float] = None,
         mass_source: Optional[Union[Any, str]] = None,
         story_weights: Optional[List[float]] = None,
         custom_period: Optional[float] = None,
@@ -661,8 +694,11 @@ class LoadGenerator:
         seismic_case_id : str, optional
             Custom load case ID. If direction='both', suffixes '_X' and '_Y' are appended
             (e.g. 'EQ' -> 'EQ_X', 'EQ_Y'). Defaults to 'EQ_X' and 'EQ_Y'.
-        story_elevations : List[float], optional
-            Story elevations above base. Inferred automatically from geometry if None.
+        stories : List[Story], optional
+            Named stories above base. Inferred automatically from geometry if None.
+        base_elevation : float, optional
+            Base datum elevation for ASCE 7-22 §12.8.3 h_x measurements. Uses model.base_elevation
+            when omitted, or infers from lowest supports with a message in ``self.messages``.
         mass_source : MassSource, dict, or str, optional
             Mass source specification defining load multipliers and element self-mass.
             If None, uses model.mass_source or derives weights from dead load cases.
@@ -704,18 +740,27 @@ class LoadGenerator:
                 f"Invalid distribution '{distribution}'. Must be 'face' or 'uniform'."
             )
 
-        elevations = story_elevations or self.detect_story_elevations(model)
-        if not elevations:
+        self.messages = []
+        base_elev = (
+            float(base_elevation)
+            if base_elevation is not None
+            else resolve_base_elevation(model, messages=self.messages)
+        )
+        story_list = list(stories) if stories else self.detect_stories(model)
+        if not story_list:
             raise ValueError(
-                "No story elevations detected in model. Specify story_elevations or ensure model geometry has defined floor levels."
+                "No stories detected in model. Specify stories or ensure model geometry has defined floor levels."
             )
+        elevations = [float(s.elevation) for s in story_list]
 
         # Calculate exact story weights from explicit input, mass source, or dead loads
         if story_weights is not None:
             exact_weights = list(story_weights)
         elif mass_source is not None or getattr(model, "mass_source", None) is not None:
             ms_target = mass_source if mass_source is not None else getattr(model, "mass_source", None)
-            ms_res = calculate_mass_source(model, mass_source=ms_target, units=active_units)
+            ms_res = calculate_mass_source(
+                model, mass_source=ms_target, units=active_units, base_elevation=base_elev
+            )
             exact_weights = [round(ms_res.story_weights.get(elev, 0.0), 2) for elev in elevations]
             if sum(exact_weights) <= 1e-3:
                 exact_weights = self.calculate_model_seismic_weight(
@@ -726,6 +771,7 @@ class LoadGenerator:
                     snow_cases=snow_cases,
                     flat_roof_snow_pressure=flat_roof_snow_pressure,
                     equipment_cases=equipment_cases,
+                    base_elevation=base_elev,
                 )
         else:
             exact_weights = self.calculate_model_seismic_weight(
@@ -736,6 +782,7 @@ class LoadGenerator:
                 snow_cases=snow_cases,
                 flat_roof_snow_pressure=flat_roof_snow_pressure,
                 equipment_cases=equipment_cases,
+                base_elevation=base_elev,
             )
 
         # Ensure model has defined dead loads/sections
@@ -751,9 +798,10 @@ class LoadGenerator:
         seismic_params = params
 
         elf_result = calculate_seismic_elf(
-            story_elevations=elevations,
+            stories=story_list,
             story_weights=exact_weights,
             params=seismic_params,
+            base_elevation=base_elev,
             units=active_units,
             custom_period=custom_period,
         )
@@ -895,7 +943,8 @@ class LoadGenerator:
         exposure_category: str = "B",
         direction: str = "X",
         wind_case_id: str = "Wind_X",
-        story_elevations: Optional[List[float]] = None,
+        stories: Optional[List[Story]] = None,
+        base_elevation: Optional[float] = None,
     ) -> Tuple[Union[LoadCase, List[LoadCase]], StoryWindResult]:
         """
         Apply ASCE 7 wind lateral forces to the building frame.
@@ -908,14 +957,21 @@ class LoadGenerator:
         v_axis = get_vertical_axis(model)
         is_3d = detect_model_dimensionality(model) == "3d"
 
-        elevations = story_elevations or self.detect_story_elevations(model)
-        if not elevations:
+        self.messages = []
+        base_elev = (
+            float(base_elevation)
+            if base_elevation is not None
+            else resolve_base_elevation(model, messages=self.messages)
+        )
+        story_list = list(stories) if stories else self.detect_stories(model)
+        if not story_list:
             raise ValueError(
-                "No story elevations detected in model. Specify story_elevations or ensure model geometry has defined floor levels."
+                "No stories detected in model. Specify stories or ensure model geometry has defined floor levels."
             )
+        elevations = [float(s.elevation) for s in story_list]
 
         story_heights = []
-        prev_h = 0.0
+        prev_h = base_elev
         for elev in elevations:
             story_heights.append(elev - prev_h)
             prev_h = elev
@@ -926,10 +982,11 @@ class LoadGenerator:
         )
 
         wind_result = calculate_wind_forces(
-            story_elevations=elevations,
+            stories=story_list,
             tributary_widths=[tributary_width] * len(elevations),
             story_heights=story_heights,
             params=wind_params,
+            base_elevation=base_elev,
             units=active_units,
         )
 
@@ -1141,8 +1198,13 @@ class LoadGenerator:
         return combs
 
     @staticmethod
-    def detect_story_elevations(model: StructuralModel, tolerance: float = 0.05) -> List[float]:
+    def detect_stories(
+        model: StructuralModel,
+        tolerance: float = 0.05,
+        *,
+        messages: Optional[List[str]] = None,
+    ) -> List[Story]:
         """
-        Inspect model nodes and horizontal beams to identify unique floor elevations.
+        Inspect model nodes and horizontal beams to identify named floor stories above base.
         """
-        return detect_story_elevations(model, tolerance=tolerance)
+        return detect_stories(model, tolerance=tolerance, messages=messages)

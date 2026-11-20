@@ -8,6 +8,7 @@ from struct_core import (
     Node,
     RectangularSection,
     StructuralModel,
+    Support,
 )
 
 
@@ -64,4 +65,5 @@ def build_3d_frame_model() -> StructuralModel:
         elements=elements,
         materials=[mat],
         sections=[col_sec, bm_sec],
+        supports=[Support.fixed_3d(nid) for nid in (1, 2, 3, 4)],
     )

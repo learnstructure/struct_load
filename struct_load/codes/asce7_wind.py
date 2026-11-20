@@ -69,11 +69,12 @@ def leeward_wall_cp(l_over_b: float) -> float:
 
 
 def calculate_wind_forces(
-    story_elevations: List[float],
+    stories: List[Any],
     tributary_widths: List[float],
     story_heights: List[float],
     params: WindParameters,
     *,
+    base_elevation: float,
     units: Union[str, Any, dict],
 ) -> StoryWindResult:
     """
@@ -81,14 +82,16 @@ def calculate_wind_forces(
 
     Parameters
     ----------
-    story_elevations : List[float]
-        Elevation of each level (m or ft).
+    stories : List[Story]
+        Named stories above base (elevations in m or ft).
     tributary_widths : List[float]
         Width of building normal to wind tributary to this frame (m or ft).
     story_heights : List[float]
         Tributary story height for each level (m or ft).
     params : WindParameters
         Wind criteria (speed, exposure, etc.).
+    base_elevation : float
+        Base datum elevation from which heights z above ground are measured (no default of 0).
     units : str, Units, or dict
         Active engineering units.
 
@@ -97,7 +100,20 @@ def calculate_wind_forces(
     StoryWindResult
         Contains net pressures and story lateral forces.
     """
-    from struct_core import conversion_factor, parse_units
+    from struct_core import Story, conversion_factor, parse_units
+    if not stories:
+        raise ValueError("stories cannot be empty.")
+    heights_above_base: List[float] = []
+    for st in stories:
+        if not isinstance(st, Story):
+            raise TypeError(f"stories must contain struct_core.Story objects, got {type(st).__name__}.")
+        hx = float(st.elevation) - float(base_elevation)
+        if hx <= 0.0:
+            raise ValueError(
+                f"Story {st.name!r} elevation ({st.elevation:g}) must be strictly above base_elevation ({base_elevation:g})."
+            )
+        heights_above_base.append(hx)
+
     active_units = parse_units(units)
     is_si = active_units.length in ("m", "mm", "cm")
 
@@ -121,10 +137,10 @@ def calculate_wind_forces(
 
     g = params.gust_factor
     # Leeward wall: Cp from L/B with qh at the mean roof height (taken as the top level), uniform over height
-    qh = velocity_pressure(max(story_elevations))
+    qh = velocity_pressure(max(heights_above_base))
     p_leeward = qh * params.kd * g * abs(leeward_wall_cp(params.l_over_b))
 
-    for idx, (z, trib_w, h_story) in enumerate(zip(story_elevations, tributary_widths, story_heights)):
+    for idx, (z, trib_w, h_story) in enumerate(zip(heights_above_base, tributary_widths, story_heights)):
         # Windward wall: Cp = 0.8 with qz at the level
         p_windward = velocity_pressure(z) * params.kd * g * 0.8
         p_net = p_windward + p_leeward

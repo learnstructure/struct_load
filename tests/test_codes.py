@@ -3,6 +3,7 @@ Unit tests for struct_load codes subpackage (ASCE 7 tables, combinations, seismi
 """
 
 import pytest
+from struct_core import Story
 from struct_load.codes.asce7_tables import (
     lookup_occupancy,
     get_occupancy_live_load,
@@ -90,10 +91,11 @@ def test_asce7_seismic_elf():
         system_type="rc_smf",
         method=2,
     )
-    story_elevations = [3.5, 7.0]  # 2 stories, 3.5m each
+    from struct_core import Story
+    stories = [Story(name="Story1", elevation=3.5), Story(name="Story2", elevation=7.0)]  # 2 stories, 3.5m each
     story_weights = [150.0, 150.0]  # 150 kN per floor
 
-    res = calculate_seismic_elf(story_elevations, story_weights, params, units="kN, m")
+    res = calculate_seismic_elf(stories, story_weights, params, base_elevation=0.0, units="kN, m")
     assert res.base_shear > 0.0
     assert len(res.story_forces) == 2
     # Upper floor force should be greater than or equal to lower floor force
@@ -241,16 +243,30 @@ def test_asce7_22_period_equations():
 
 
 def test_asce7_wind():
+    from struct_core import Story
     params = WindParameters(basic_wind_speed=40.0, exposure_category="B")
-    story_elevations = [3.5, 7.0]
+    stories = [Story(name="Story1", elevation=3.5), Story(name="Story2", elevation=7.0)]
     trib_widths = [5.0, 5.0]
     story_heights = [3.5, 3.5]
 
-    res = calculate_wind_forces(story_elevations, trib_widths, story_heights, params, units="kN, m")
+    res = calculate_wind_forces(stories, trib_widths, story_heights, params, base_elevation=0.0, units="kN, m")
     assert res.total_base_shear > 0.0
     assert len(res.story_forces) == 2
     # Upper story pressure should be higher due to Kz increasing with height
     assert res.story_pressures[2] >= res.story_pressures[1]
+
+    # Non-zero base_elevation: shifted elevations give identical wind forces (ASCE 7-22 height above base)
+    shifted_stories = [Story(name="Story1", elevation=13.5), Story(name="Story2", elevation=17.0)]
+    res_shifted = calculate_wind_forces(shifted_stories, trib_widths, story_heights, params, base_elevation=10.0, units="kN, m")
+    assert res_shifted.total_base_shear == pytest.approx(res.total_base_shear, rel=1e-12)
+    assert res_shifted.story_forces == pytest.approx(res.story_forces, rel=1e-12)
+
+    # Non-zero base_elevation in ELF gives identical seismic forces (ASCE 7-22 §12.8.3)
+    s_params = SeismicParameters(sds=0.75, sd1=0.40, site_class="D", risk_category="II", r_factor=8.0, system_type="rc_smf")
+    elf_0 = calculate_seismic_elf(stories, [150.0, 150.0], s_params, base_elevation=0.0, units="kN, m")
+    elf_10 = calculate_seismic_elf(shifted_stories, [150.0, 150.0], s_params, base_elevation=10.0, units="kN, m")
+    assert elf_10.base_shear == elf_0.base_shear
+    assert elf_10.story_forces == elf_0.story_forces
 
 
 def test_asce7_seismic_design_category():
@@ -486,14 +502,15 @@ def test_wind_leeward_uses_qh_and_l_over_b():
 
     # Two levels: the leeward pressure is the same at both (qh), so the level difference is windward only
     params = WindParameters(basic_wind_speed=115.0, exposure_category="C", l_over_b=2.0)
-    res = calculate_wind_forces([12.0, 24.0], [20.0, 20.0], [12.0, 12.0], params, units="lbf, ft")
+    stories = [Story(name="Story1", elevation=12.0), Story(name="Story2", elevation=24.0)]
+    res = calculate_wind_forces(stories, [20.0, 20.0], [12.0, 12.0], params, base_elevation=0.0, units="lbf, ft")
     q = lambda z: 0.00256 * calculate_kz(z, "C", units="lbf, ft") * 115.0 ** 2
     leeward = q(24.0) * 0.85 * 0.85 * 0.3
     assert res.story_pressures[1] == pytest.approx(q(12.0) * 0.85 * 0.85 * 0.8 + leeward, abs=1e-3)
     assert res.story_pressures[2] == pytest.approx(q(24.0) * 0.85 * 0.85 * 0.8 + leeward, abs=1e-3)
 
     # kip-ft models receive ksf pressures and kip forces
-    res_kip = calculate_wind_forces([12.0, 24.0], [20.0, 20.0], [12.0, 12.0], params, units="kip, ft")
+    res_kip = calculate_wind_forces(stories, [20.0, 20.0], [12.0, 12.0], params, base_elevation=0.0, units="kip, ft")
     assert res_kip.total_base_shear == pytest.approx(res.total_base_shear / 1000.0, rel=1e-3)
 
 
@@ -545,8 +562,22 @@ def test_m2_required_units_and_seismic_parameters():
         calculate_wind_forces(height=20.0, width=10.0, length=15.0, v=115.0)
     with pytest.raises(TypeError):
         approximate_fundamental_period(total_height=15.0)
+    from struct_core import Story
     with pytest.raises(TypeError):
-        calculate_seismic_elf(story_elevations=[3.0, 6.0], story_weights=[100.0, 100.0], params=SeismicParameters(sds=1.0, sd1=0.4, site_class='D', risk_category='II', r_factor=8.0))
+        calculate_seismic_elf(
+            stories=[Story(name="Story1", elevation=3.0), Story(name="Story2", elevation=6.0)],
+            story_weights=[100.0, 100.0],
+            params=SeismicParameters(sds=1.0, sd1=0.4, site_class='D', risk_category='II', r_factor=8.0),
+            base_elevation=0.0,
+        )
+    # Missing base_elevation must also raise TypeError (no default of 0)
+    with pytest.raises(TypeError):
+        calculate_seismic_elf(
+            stories=[Story(name="Story1", elevation=3.0)],
+            story_weights=[100.0],
+            params=SeismicParameters(sds=1.0, sd1=0.4, site_class='D', risk_category='II', r_factor=8.0),
+            units="kN, m",
+        )
     with pytest.raises(TypeError):
         calculate_flat_roof_snow_load(pg=1.5)
     with pytest.raises(TypeError):

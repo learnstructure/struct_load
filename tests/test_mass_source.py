@@ -13,6 +13,7 @@ from struct_core import (
     Node,
     PointLoad,
     RectangularSection,
+    Story,
     StructuralModel,
 )
 from struct_load import calculate_mass_source
@@ -56,7 +57,8 @@ def sample_2d_portal_model():
         materials=[mat],
         sections=[sec],
         load_cases=[lc_dead, lc_live],
-        story_elevations=[0.0, 4.0],
+        base_elevation=0.0,
+        stories=[Story(name="Story1", elevation=4.0)],
     )
     return model
 
@@ -419,5 +421,70 @@ def test_explicit_zero_density_material_allowed_while_missing_density_refused():
     ms = MassSource(id="MS", include_element_mass=True, include_added_mass=True, factors=[])
     res = calculate_mass_source(model, mass_source=ms, units="kN, m")
     assert res.total_mass == pytest.approx(5.0, rel=1e-12)
+
+
+def test_base_mass_excluded_consistently_with_or_without_explicit_base_elevation():
+    """Mass at the restrained base is excluded identically whether base_elevation is explicit or inferred
+    from lowest supports, and identically across calculate_mass_source and calculate_model_seismic_weight."""
+    from struct_core import Support
+    from struct_load import LoadGenerator, SeismicParameters
+
+    def _make_portal(base_elev):
+        return StructuralModel(
+            units="kN, m",
+            nodes=[
+                Node(id="N1", x=0.0, y=0.0),
+                Node(id="N2", x=6.0, y=0.0),
+                Node(id="N3", x=0.0, y=4.0),
+                Node(id="N4", x=6.0, y=4.0),
+            ],
+            supports=[Support.fixed("N1"), Support.fixed("N2")],
+            materials=[ElasticMaterial(id="CONC", E=25e6, unit_weight=24.0)],
+            sections=[RectangularSection(id="S", material_id="CONC", b=0.4, h=0.4)],
+            elements=[
+                BeamElement(id="C1", start_node="N1", end_node="N3", section_id="S"),
+                BeamElement(id="C2", start_node="N2", end_node="N4", section_id="S"),
+                BeamElement(id="B1", start_node="N3", end_node="N4", section_id="S"),
+            ],
+            load_cases=[
+                LoadCase(id="PART", load_type="partition", element_loads=[DistributedLoad(element_id="B1", wy=-20.0)]),
+            ],
+            base_elevation=base_elev,
+            stories=[Story(name="Story1", elevation=4.0)],
+        )
+
+    # Beam weight = 6*0.16*24 = 23.04; each column = 4*0.16*24 = 15.36; beam partition = 120.0.
+    # Above base (Story1): partition (120) + beam self-weight (23.04) + top half of 2 columns (15.36) = 158.40 kN.
+    # Base (excluded): bottom half of 2 columns = 15.36 kN.
+    expected_story1_w = 120.0 + 6.0 * 0.16 * 24.0 + 4.0 * 0.16 * 24.0  # 158.40 kN
+    ms = MassSource(
+        id="MS1", include_element_mass=True, include_added_mass=False,
+        factors=[MassSourceFactor(load_case_id="PART", factor=1.0)],
+    )
+    m_explicit = _make_portal(0.0)
+    m_inferred = _make_portal(None)
+
+    res_exp = calculate_mass_source(m_explicit, mass_source=ms)
+    res_inf = calculate_mass_source(m_inferred, mass_source=ms)
+    assert res_exp.story_weights[4.0] == pytest.approx(expected_story1_w, rel=1e-6)
+    assert res_inf.story_weights[4.0] == pytest.approx(expected_story1_w, rel=1e-6)
+    assert res_inf.story_weights[0.0] == pytest.approx(15.36, rel=1e-6)
+    assert any("lowest support" in msg for msg in res_inf.messages)
+
+    params = SeismicParameters(sds=1.0, sd1=0.4, site_class="D", risk_category="II", r_factor=8.0)
+    gen_exp_ms = LoadGenerator(units="kN, m")
+    _, elf_exp_ms = gen_exp_ms.apply_lateral_seismic(m_explicit, params=params, mass_source=ms)
+    gen_inf_ms = LoadGenerator(units="kN, m")
+    _, elf_inf_ms = gen_inf_ms.apply_lateral_seismic(m_inferred, params=params, mass_source=ms)
+    gen_exp_w = LoadGenerator(units="kN, m")
+    _, elf_exp_w = gen_exp_w.apply_lateral_seismic(_make_portal(0.0), params=params)
+    gen_inf_w = LoadGenerator(units="kN, m")
+    _, elf_inf_w = gen_inf_w.apply_lateral_seismic(_make_portal(None), params=params)
+
+    for elf in (elf_exp_ms, elf_inf_ms, elf_exp_w, elf_inf_w):
+        assert elf.base_shear == pytest.approx(0.125 * expected_story1_w, rel=1e-4)
+    assert any("lowest support" in msg for msg in gen_inf_ms.messages)
+    assert any("lowest support" in msg for msg in gen_inf_w.messages)
+
 
 

@@ -45,15 +45,58 @@ def detect_model_dimensionality(model: StructuralModel, tolerance: float = 1e-4)
     return "3d" if dims_with_extent >= 3 else "2d"
 
 
-def detect_story_elevations(
+def resolve_base_elevation(
+    model: StructuralModel,
+    *,
+    messages: Optional[List[str]] = None,
+) -> float:
+    """
+    Return the structural base elevation for ASCE 7-22 §12.8.3 / §26.10 height measurements.
+
+    Uses ``model.base_elevation`` when set. Otherwise infers the elevation of the lowest
+    supported node and appends an explanatory note to ``messages`` (if provided). Never
+    defaults silently to 0.
+    """
+    base_elev = getattr(model, "base_elevation", None)
+    if base_elev is not None:
+        return float(base_elev)
+
+    from struct_core import vertical_axis as get_vertical_axis
+
+    v_axis = get_vertical_axis(model)
+    use_z = (v_axis == "z")
+    nodes_map = {n.id: n for n in getattr(model, "nodes", [])}
+    sup_coords: List[float] = []
+    for sup in getattr(model, "supports", []) or []:
+        nd = nodes_map.get(sup.node_id)
+        if nd is not None:
+            sup_coords.append(float(getattr(nd, "z", 0.0) if use_z else nd.y))
+    if sup_coords:
+        inferred = min(sup_coords)
+        if messages is not None:
+            messages.append(
+                f"Model has no base_elevation; used lowest support elevation ({inferred:g}) as the base datum."
+            )
+        return inferred
+
+    raise ValueError(
+        "Model has no base_elevation and no supports from which to determine the base elevation. "
+        "Set model.base_elevation explicitly or define supports."
+    )
+
+
+def detect_stories(
     model: StructuralModel,
     tolerance: float = 0.05,
-) -> List[float]:
+    *,
+    messages: Optional[List[str]] = None,
+) -> List[Any]:
     """
-    Identify unique floor / story elevations above ground level (> tolerance).
+    Identify named stories above the base datum.
 
-    In a 3D model, story elevations correspond to Z coordinates.
-    In a 2D plane frame, story elevations correspond to Y coordinates.
+    Returns ``model.stories`` (sorted ascending by elevation) when defined. Otherwise infers
+    unique floor levels from horizontal beams (or nodes) strictly above the base elevation
+    and names them ``Story1``, ``Story2``, ...
 
     Parameters
     ----------
@@ -61,25 +104,33 @@ def detect_story_elevations(
         The structural model.
     tolerance : float
         Tolerance for grouping similar elevation coordinates.
+    messages : List[str], optional
+        If provided, records a note when the base elevation is inferred from supports.
 
     Returns
     -------
-    List[float]
-        Sorted list of story elevations (ascending).
+    List[Story]
+        Sorted list of named stories above base (ascending by elevation).
     """
-    # If the model explicitly specifies story elevations, use them
-    explicit_elevs = getattr(model, "story_elevations", None)
-    if explicit_elevs:
-        filtered = sorted([round(float(e), 4) for e in explicit_elevs if float(e) > tolerance])
-        if filtered:
-            return filtered
+    from struct_core import Story, vertical_axis as get_vertical_axis
 
-    from struct_core import vertical_axis as get_vertical_axis
+    explicit_stories = getattr(model, "stories", None)
+    if explicit_stories:
+        return sorted(list(explicit_stories), key=lambda s: float(s.elevation))
 
     is_3d = detect_model_dimensionality(model, tolerance=tolerance) == "3d"
     v_axis = get_vertical_axis(model)
     use_z = (v_axis == "z")
     nodes_map = {n.id: n for n in model.nodes}
+
+    if getattr(model, "base_elevation", None) is not None:
+        base_elev = float(model.base_elevation)
+    elif getattr(model, "supports", None):
+        base_elev = resolve_base_elevation(model, messages=messages)
+    elif model.nodes:
+        base_elev = min(float(getattr(n, "z", 0.0) if use_z else n.y) for n in model.nodes)
+    else:
+        return []
 
     # Gather elevations from horizontal beams first (most accurate structural indicator)
     beam_elevs: List[float] = []
@@ -94,13 +145,13 @@ def detect_story_elevations(
 
         if is_horizontal_beam(elem, nodes_map, is_3d=is_3d, tolerance=tolerance, vertical_axis=v_axis):
             elev = get_beam_elevation(elem, nodes_map, is_3d=is_3d, vertical_axis=v_axis)
-            if elev > tolerance:
+            if elev > base_elev + tolerance:
                 beam_elevs.append(round(elev, 4))
 
     raw_elevs = beam_elevs if beam_elevs else [
         round(float(getattr(n, "z", 0.0) if use_z else getattr(n, "y", 0.0)), 4)
         for n in model.nodes
-        if float(getattr(n, "z", 0.0) if use_z else getattr(n, "y", 0.0)) > tolerance
+        if float(getattr(n, "z", 0.0) if use_z else getattr(n, "y", 0.0)) > base_elev + tolerance
     ]
 
     unique_sorted = sorted(list(set(raw_elevs)))
@@ -109,7 +160,7 @@ def detect_story_elevations(
         if not filtered_elevations or abs(elev - filtered_elevations[-1]) > tolerance:
             filtered_elevations.append(elev)
 
-    return filtered_elevations
+    return [Story(name=f"Story{idx}", elevation=ev) for idx, ev in enumerate(filtered_elevations, start=1)]
 
 
 def is_horizontal_beam(

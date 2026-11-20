@@ -60,7 +60,9 @@ def demo_mwfrs_story_forces():
     # 5-story commercial building:
     # 5 levels at 3.6 m increments (Total height = 18.0 m)
     # Building width perpendicular to wind tributary to this frame: 15.0 m
+    from struct_core import Story
     story_elevs = [3.6, 7.2, 10.8, 14.4, 18.0]
+    stories = [Story(name=f"Story{i}", elevation=z) for i, z in enumerate(story_elevs, start=1)]
     story_heights = [3.6, 3.6, 3.6, 3.6, 3.6]
     trib_widths = [15.0] * 5
 
@@ -78,10 +80,11 @@ def demo_mwfrs_story_forces():
     )
 
     res_c = calculate_wind_forces(
-        story_elevations=story_elevs,
+        stories=stories,
         tributary_widths=trib_widths,
         story_heights=story_heights,
         params=params_c,
+        base_elevation=0.0,
         units="kN, m",
     )
 

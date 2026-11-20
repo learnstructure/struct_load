@@ -4,11 +4,12 @@ Calculation engine subpackage for struct_load.
 
 from .geometry import (
     detect_model_dimensionality,
-    detect_story_elevations,
+    detect_stories,
     get_beam_elevation,
     get_beam_length,
     get_beam_span_and_orientation,
     is_horizontal_beam,
+    resolve_base_elevation,
 )
 from .mass_source import (
     MassSourceResult,
@@ -32,7 +33,8 @@ from .tributary import (
 
 __all__ = [
     "detect_model_dimensionality",
-    "detect_story_elevations",
+    "detect_stories",
+    "resolve_base_elevation",
     "is_horizontal_beam",
     "get_beam_elevation",
     "get_beam_length",

@@ -90,7 +90,9 @@ def demo_multi_story_elf_distribution():
     # 4-Story Building Data:
     # Elevations (m): Story 1 = 3.5, Story 2 = 7.0, Story 3 = 10.5, Story 4 (Roof) = 14.0
     # Story Seismic Weights Wi (kN): Floors = 2500 kN, Roof = 1800 kN
+    from struct_core import Story
     story_elevs = [3.5, 7.0, 10.5, 14.0]
+    stories = [Story(name=f"Story{i}", elevation=z) for i, z in enumerate(story_elevs, start=1)]
     story_weights = [2500.0, 2500.0, 2500.0, 1800.0]  # kN
     total_w = sum(story_weights)
 
@@ -106,9 +108,10 @@ def demo_multi_story_elf_distribution():
     )
 
     elf_result = calculate_seismic_elf(
-        story_elevations=story_elevs,
+        stories=stories,
         story_weights=story_weights,
         params=params,
+        base_elevation=0.0,
         units="kN, m",
     )
 

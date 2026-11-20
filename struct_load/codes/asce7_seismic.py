@@ -623,10 +623,11 @@ def calculate_seismic_response_coefficient(
 
 
 def calculate_seismic_elf(
-    story_elevations: List[float],
+    stories: List[Any],
     story_weights: List[float],
     params: SeismicParameters,
     *,
+    base_elevation: float,
     units: Union[str, Any, dict],
     custom_period: Optional[float] = None,
     use_story_count_formula: bool = False,
@@ -639,13 +640,15 @@ def calculate_seismic_elf(
 
     Parameters
     ----------
-    story_elevations : List[float]
-        Elevation of each story above base, sorted ascending (e.g. [3.5, 7.0] m).
+    stories : List[Story]
+        Named stories above base, sorted ascending by elevation.
     story_weights : List[float]
         Effective seismic weight wi assigned to each story level.
     params : SeismicParameters
         Seismic design parameters (SDS, SD1, R, Ie, TL, S1, site_class, method, etc.).
-    units : str, Units, or dict, default="kN, m"
+    base_elevation : float
+        Base datum elevation from which story heights h_x are measured (ASCE 7-22 §12.8.3; no default of 0).
+    units : str, Units, or dict
         Active engineering units.
     custom_period : float, optional
         Calculated fundamental period T from structural analysis (e.g. modal analysis).
@@ -661,15 +664,26 @@ def calculate_seismic_elf(
         Complete ELF analysis result containing base shear, Cs, period, story forces Fx,
         and story shears Vx per ASCE 7-22 Section 12.8.
     """
-    if len(story_elevations) != len(story_weights):
-        raise ValueError("story_elevations and story_weights must have the same length.")
-    if len(story_elevations) == 0:
-        raise ValueError("story_elevations and story_weights cannot be empty.")
+    if len(stories) != len(story_weights):
+        raise ValueError("stories and story_weights must have the same length.")
+    if len(stories) == 0:
+        raise ValueError("stories and story_weights cannot be empty.")
 
-    from struct_core import parse_units
+    from struct_core import Story, parse_units
+    heights_above_base: List[float] = []
+    for st in stories:
+        if not isinstance(st, Story):
+            raise TypeError(f"stories must contain struct_core.Story objects, got {type(st).__name__}.")
+        hx = float(st.elevation) - float(base_elevation)
+        if hx <= 0.0:
+            raise ValueError(
+                f"Story {st.name!r} elevation ({st.elevation:g}) must be strictly above base_elevation ({base_elevation:g})."
+            )
+        heights_above_base.append(hx)
+
     active_units = parse_units(units)
-    hn = story_elevations[-1]
-    num_stories = len(story_elevations)
+    hn = heights_above_base[-1]
+    num_stories = len(stories)
 
     # 1. Period Determination (Section 12.8.2)
     ta_approx = approximate_fundamental_period(
@@ -718,12 +732,12 @@ def calculate_seismic_elf(
         k = round(1.0 + (t_used - 0.5) / 2.0, 4)
 
     # 5. Vertical Distribution Factor Cvx and Lateral Force Fx (Eq. 12.8-12 & 12.8-13)
-    weighted_heights = [w * (h ** k) for w, h in zip(story_weights, story_elevations)]
+    weighted_heights = [w * (h ** k) for w, h in zip(story_weights, heights_above_base)]
     denom = sum(weighted_heights)
 
     story_forces: Dict[int, float] = {}
     cvx_dict: Dict[int, float] = {}
-    for idx, (wh, elev) in enumerate(zip(weighted_heights, story_elevations)):
+    for idx, wh in enumerate(weighted_heights):
         cvx = (wh / denom) if denom > 1e-9 else (1.0 / num_stories)
         cvx_dict[idx + 1] = round(cvx, 5)
         fx = round(cvx * base_shear, 3)

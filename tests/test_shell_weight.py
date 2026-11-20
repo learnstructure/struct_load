@@ -19,6 +19,7 @@ from struct_core import (
     ShellElement,
     ShellLoad,
     ShellSection,
+    Story,
     StructuralModel,
     Support,
 )
@@ -107,7 +108,8 @@ def test_mass_source_includes_shell_loads_of_its_patterns_without_double_countin
 
 def test_mass_source_lumps_shell_mass_at_nodes_and_stories():
     project = building()
-    project.model.story_elevations = [0.0, 3.0]
+    project.model.base_elevation = 0.0
+    project.model.stories = [Story(name="Story1", elevation=3.0)]
     res = calculate_mass_source(project, MassSource(include_element_mass=True, factors=[]))
     g = res.gravity_accel
     # The wall's mass is shared by its bottom and top nodes; the roof story gets the slab, half the wall, and half

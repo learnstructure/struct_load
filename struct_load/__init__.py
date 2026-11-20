@@ -48,10 +48,11 @@ from .codes.asce7_wind import (
 )
 from .engine.geometry import (
     detect_model_dimensionality,
-    detect_story_elevations,
+    detect_stories,
     get_beam_elevation,
     get_beam_length,
     is_horizontal_beam,
+    resolve_base_elevation,
 )
 from .engine.mass_source import (
     MassSourceResult,
@@ -121,7 +122,8 @@ __all__ = [
     "calculate_roof_live_load",
     # Geometry & Engine
     "detect_model_dimensionality",
-    "detect_story_elevations",
+    "detect_stories",
+    "resolve_base_elevation",
     "is_horizontal_beam",
     "get_beam_elevation",
     "get_beam_length",

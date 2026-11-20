@@ -22,7 +22,8 @@ from struct_core import (
 
 from .geometry import (
     detect_model_dimensionality,
-    detect_story_elevations,
+    detect_stories,
+    resolve_base_elevation,
 )
 from .self_weight import element_mass_per_length, shell_self_weights, shell_tributary
 
@@ -232,6 +233,7 @@ class MassSourceResult:
     story_masses: Dict[float, float] = field(default_factory=dict)
     mass_source: Optional[MassSource] = None
     gravity_accel: float = 9.80665
+    messages: List[str] = field(default_factory=list)
 
     @property
     def story_weights(self) -> Dict[float, float]:
@@ -244,6 +246,9 @@ def calculate_mass_source(
     mass_source: Optional[Union[MassSource, Dict[str, Any], str]] = None,
     gravity_accel: Optional[float] = None,
     units: Optional[Union[str, Units, dict]] = None,
+    *,
+    base_elevation: Optional[float] = None,
+    messages: Optional[List[str]] = None,
 ) -> MassSourceResult:
     """
     Calculate inertial mass distribution and effective seismic weight for a model.
@@ -655,20 +660,39 @@ def calculate_mass_source(
     cm_y = weighted_y / total_inertial_mass if total_inertial_mass > 1e-12 else 0.0
     cm_z = weighted_z / total_inertial_mass if total_inertial_mass > 1e-12 else 0.0
 
-    # 6. Story mass aggregation
-    story_elevations = getattr(model, "story_elevations", None)
-    if not story_elevations:
-        story_elevations = detect_story_elevations(model)
+    # 6. Story mass aggregation (mass at the restrained base lands in the base bucket,
+    # never snapped up to Story 1; base is taken from base_elevation or lowest supports)
+    ms_messages: List[str] = [] if messages is None else messages
+    stories_list = list(getattr(model, "stories", None) or [])
+    if not stories_list:
+        stories_list = detect_stories(model)
+
+    base_elev_val: Optional[float] = None
+    if base_elevation is not None:
+        base_elev_val = float(base_elevation)
+    elif getattr(model, "base_elevation", None) is not None:
+        base_elev_val = float(model.base_elevation)
+    elif getattr(model, "supports", None):
+        base_elev_val = resolve_base_elevation(model, messages=ms_messages)
+
+    elevs: List[float] = []
+    if base_elev_val is not None:
+        elevs.append(base_elev_val)
+    for st in stories_list:
+        ev = float(st.elevation)
+        if not any(abs(ev - existing) <= 1e-9 for existing in elevs):
+            elevs.append(ev)
+    elevs.sort()
 
     story_masses: Dict[float, float] = {}
-    if story_elevations:
-        for elev in story_elevations:
+    if elevs:
+        for elev in elevs:
             story_masses[elev] = 0.0
 
         for nid, m_vec in nodal_masses.items():
             nd = nodes_map[nid]
             z_coord = getattr(nd, "z", 0.0) if v_axis == "z" else nd.y
-            closest_elev = min(story_elevations, key=lambda el: abs(el - z_coord))
+            closest_elev = min(elevs, key=lambda el: abs(el - z_coord))
             m_eff = m_vec[0] if ms.lateral_only else max(m_vec)
             story_masses[closest_elev] += m_eff
 
@@ -704,12 +728,12 @@ def calculate_mass_source(
             if abs(z_i - z_j) < 1e-4:
                 # Horizontal member at elevation
                 elev = 0.5 * (z_i + z_j)
-                closest_elev = min(story_elevations, key=lambda el: abs(el - elev))
+                closest_elev = min(elevs, key=lambda el: abs(el - elev))
                 story_masses[closest_elev] += total_elem_m
             else:
                 # Vertical or inclined member: split tributary mass between endpoints
-                closest_elev_i = min(story_elevations, key=lambda el: abs(el - z_i))
-                closest_elev_j = min(story_elevations, key=lambda el: abs(el - z_j))
+                closest_elev_i = min(elevs, key=lambda el: abs(el - z_i))
+                closest_elev_j = min(elevs, key=lambda el: abs(el - z_j))
                 story_masses[closest_elev_i] += 0.5 * total_elem_m
                 story_masses[closest_elev_j] += 0.5 * total_elem_m
 
@@ -725,6 +749,7 @@ def calculate_mass_source(
         story_masses=story_masses,
         mass_source=ms,
         gravity_accel=gravity_accel,
+        messages=list(ms_messages),
     )
 
 
