@@ -48,7 +48,12 @@ from .engine.geometry import (
     is_horizontal_beam,
     resolve_base_elevation,
 )
-from .engine.mass_source import calculate_mass_source
+from .engine.mass_source import (
+    MassSourceResult,
+    calculate_mass_source,
+    create_asce7_mass_source,
+    nodal_lumped_masses,
+)
 from .engine.self_weight import (
     calculate_section_area,
     calculate_self_weight,
@@ -707,10 +712,14 @@ class LoadGenerator:
         custom_period : float, optional
             Calculated or modal fundamental period T (s). Subject to upper limit Cu*Ta per ASCE 7 Section 12.8.2.
         distribution : str, optional
-            Horizontal distribution pattern of story lateral forces among floor nodes:
+            Horizontal distribution pattern of story lateral forces among floor nodes on floors
+            without a rigid diaphragm:
             - 'face' (default): distributes story force equally across nodes on the exterior boundary
               frame face along the loading direction (min x for X-direction, min y for Y-direction).
             - 'uniform': distributes story force equally across all floor nodes at that story elevation.
+            Floors constrained by a rigid Z-diaphragm always distribute story lateral force in
+            proportion to each node's seismic mass so the resultant passes through the floor center of
+            mass per ASCE 7-22 §12.8.4.1.
         storage_live_cases : List[str], optional
             Load case IDs for storage live load (minimum 25% factor per ASCE 7-22 Section 12.7.2 Item 1).
         partition_cases : List[str], optional
@@ -754,6 +763,7 @@ class LoadGenerator:
         elevations = [float(s.elevation) for s in story_list]
 
         # Calculate exact story weights from explicit input, mass source, or dead loads
+        ms_res: Optional[MassSourceResult] = None
         if story_weights is not None:
             exact_weights = list(story_weights)
         elif mass_source is not None or getattr(model, "mass_source", None) is not None:
@@ -763,6 +773,7 @@ class LoadGenerator:
             )
             exact_weights = [round(ms_res.story_weights.get(elev, 0.0), 2) for elev in elevations]
             if sum(exact_weights) <= 1e-3:
+                ms_res = None
                 exact_weights = self.calculate_model_seismic_weight(
                     model,
                     elevations,
@@ -806,6 +817,111 @@ class LoadGenerator:
             custom_period=custom_period,
         )
 
+        # Resolve per-node lumped seismic masses only if the model defines horizontal rigid diaphragms
+        nodes_map = {n.id: n for n in model.nodes}
+        diaphs_by_elev: List[Tuple[Any, float]] = []
+        node_tot_masses: Optional[Dict[Any, Tuple[float, float, float]]] = None
+        if is_3d and v_axis == "z":
+            for d in getattr(model, "diaphragms", None) or []:
+                if getattr(d, "axis", "Z") != "Z":
+                    continue
+                zs_d = [float(getattr(nodes_map[nid], "z", 0.0)) for nid in d.node_ids if nid in nodes_map]
+                if zs_d:
+                    diaphs_by_elev.append((d, sum(zs_d) / len(zs_d)))
+
+        if diaphs_by_elev:
+            diaph_ms_res = ms_res
+            if diaph_ms_res is None:
+                if mass_source is not None or getattr(model, "mass_source", None) is not None:
+                    ms_target = mass_source if mass_source is not None else getattr(model, "mass_source", None)
+                    diaph_ms_res = calculate_mass_source(
+                        model, mass_source=ms_target, units=active_units, base_elevation=base_elev
+                    )
+                else:
+                    asce7_ms = create_asce7_mass_source(
+                        model,
+                        storage_live_case_ids=storage_live_cases,
+                        partition_load_case_ids=partition_cases,
+                        snow_load_case_ids=snow_cases,
+                        flat_roof_snow_pressure=flat_roof_snow_pressure,
+                        equipment_case_ids=equipment_cases,
+                        include_element_mass=True,
+                        include_added_mass=True,
+                        units=active_units,
+                    )
+                    diaph_ms_res = calculate_mass_source(
+                        model, mass_source=asce7_ms, units=active_units, base_elevation=base_elev
+                    )
+            node_tot_masses = nodal_lumped_masses(
+                model, diaph_ms_res, units=active_units, gravity_accel=diaph_ms_res.gravity_accel
+            )
+
+        def _story_point_loads(elev: float, story_force: float, axis_dir: str) -> List[PointLoad]:
+            floor_nodes = [
+                n for n in model.nodes
+                if abs((getattr(n, "z", 0.0) if v_axis == "z" else n.y) - elev) <= 0.1
+            ]
+            story_diaphs = [d for d, z_d in diaphs_by_elev if abs(z_d - elev) <= 0.1]
+            if not story_diaphs:
+                if not floor_nodes:
+                    return []
+                if dist_choice == "face":
+                    min_coord = min(n.x if axis_dir == "X" else n.y for n in floor_nodes)
+                    face_nodes = [
+                        n for n in floor_nodes
+                        if abs((n.x if axis_dir == "X" else n.y) - min_coord) <= 0.05
+                    ]
+                    f_node = story_force / len(face_nodes)
+                    targets = face_nodes
+                else:  # uniform
+                    f_node = story_force / len(floor_nodes)
+                    targets = floor_nodes
+                kw_name = "fx" if axis_dir == "X" else "fy"
+                return [PointLoad(node_id=nd.id, **{kw_name: round(f_node, 4)}) for nd in targets]
+
+            # Floor constrained by a rigid Z-diaphragm: distribute by nodal seismic mass (ASCE 7-22 §12.8.4.1)
+            seen_ids = {n.id for n in floor_nodes}
+            target_nodes = list(floor_nodes)
+            for d in story_diaphs:
+                for nid in d.node_ids:
+                    if nid in nodes_map and nid not in seen_ids:
+                        seen_ids.add(nid)
+                        target_nodes.append(nodes_map[nid])
+            if not target_nodes:
+                return []
+
+            axis_idx = 0 if axis_dir == "X" else 1
+            kw_name = "fx" if axis_dir == "X" else "fy"
+            weights = [
+                max(0.0, float((node_tot_masses or {}).get(nd.id, (0.0, 0.0, 0.0))[axis_idx]))
+                for nd in target_nodes
+            ]
+            w_sum = sum(weights)
+            if w_sum > 1e-12:
+                return [
+                    PointLoad(node_id=nd.id, **{kw_name: float(story_force) * (w_i / w_sum)})
+                    for nd, w_i in zip(target_nodes, weights)
+                    if w_i > 0.0
+                ]
+
+            f_node = float(story_force) / len(target_nodes)
+            fallback_msg = (
+                f"Story at elevation {elev:g} has rigid diaphragm(s) {[d.id for d in story_diaphs]} with zero "
+                f"nodal mass; distributed ELF force uniformly across {len(target_nodes)} floor nodes."
+            )
+            if fallback_msg not in self.messages:
+                self.messages.append(fallback_msg)
+            return [PointLoad(node_id=nd.id, **{kw_name: f_node}) for nd in target_nodes]
+
+        diaph_story_ids = sorted({
+            d.id for elev in elevations for d, z_d in diaphs_by_elev if abs(z_d - elev) <= 0.1
+        })
+        if diaph_story_ids:
+            self.messages.append(
+                f"Rigid diaphragm floor(s) {diaph_story_ids} distributed ELF story forces in proportion "
+                f"to nodal seismic mass so the resultant acts at the center of mass (ASCE 7-22 §12.8.4.1)."
+            )
+
         dir_choice = direction.upper().strip()
         do_x = dir_choice in ("X", "BOTH")
         do_y = dir_choice in ("Y", "BOTH")
@@ -836,23 +952,7 @@ class LoadGenerator:
         if do_x:
             point_loads_x: List[PointLoad] = []
             for idx, elev in enumerate(elevations):
-                fx = elf_result.story_forces[idx + 1]
-                floor_nodes = [
-                    n for n in model.nodes
-                    if abs((getattr(n, "z", 0.0) if v_axis == "z" else n.y) - elev) <= 0.1
-                ]
-                if not floor_nodes:
-                    continue
-                if dist_choice == "face":
-                    min_x = min(n.x for n in floor_nodes)
-                    face_nodes = [n for n in floor_nodes if abs(n.x - min_x) <= 0.05]
-                    f_node = fx / len(face_nodes)
-                    for target_node in face_nodes:
-                        point_loads_x.append(PointLoad(node_id=target_node.id, fx=round(f_node, 4)))
-                else:  # uniform
-                    f_node = fx / len(floor_nodes)
-                    for target_node in floor_nodes:
-                        point_loads_x.append(PointLoad(node_id=target_node.id, fx=round(f_node, 4)))
+                point_loads_x.extend(_story_point_loads(elev, elf_result.story_forces[idx + 1], "X"))
 
             case_x = LoadCase(
                 id=case_id_x,
@@ -885,23 +985,7 @@ class LoadGenerator:
         if do_y:
             point_loads_y: List[PointLoad] = []
             for idx, elev in enumerate(elevations):
-                fy = elf_result.story_forces[idx + 1]
-                floor_nodes = [
-                    n for n in model.nodes
-                    if abs((getattr(n, "z", 0.0) if v_axis == "z" else n.y) - elev) <= 0.1
-                ]
-                if not floor_nodes:
-                    continue
-                if dist_choice == "face":
-                    min_y = min(n.y for n in floor_nodes)
-                    face_nodes = [n for n in floor_nodes if abs(n.y - min_y) <= 0.05]
-                    f_node = fy / len(face_nodes)
-                    for target_node in face_nodes:
-                        point_loads_y.append(PointLoad(node_id=target_node.id, fy=round(f_node, 4)))
-                else:  # uniform
-                    f_node = fy / len(floor_nodes)
-                    for target_node in floor_nodes:
-                        point_loads_y.append(PointLoad(node_id=target_node.id, fy=round(f_node, 4)))
+                point_loads_y.extend(_story_point_loads(elev, elf_result.story_forces[idx + 1], "Y"))
 
             case_y = LoadCase(
                 id=case_id_y,

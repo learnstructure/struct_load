@@ -203,6 +203,34 @@ def _grav_split_from_end_forces(
     return ni, nj
 
 
+_DIAPHRAGM_AXIS_MAP: Dict[str, Tuple[Tuple[str, str], str, Tuple[int, int], int]] = {
+    "Z": (("x", "y"), "z", (0, 1), 2),
+    "X": (("y", "z"), "x", (1, 2), 0),
+    "Y": (("z", "x"), "y", (2, 0), 1),
+}
+
+
+@dataclass(frozen=True)
+class DiaphragmMassSummary:
+    """
+    Read-only mass, center of mass, and rotational inertia summary for one rigid diaphragm.
+
+    Matches fem3d's assembled lumped mass matrix transformed through T^T M T (including nodal
+    masses, load-source masses, shell lumped masses, and half-masses of incident frame/truss
+    elements).
+    """
+
+    diaphragm_id: str
+    axis: str
+    mass: float
+    mass_1: float
+    mass_2: float
+    weight: float
+    center_of_mass: Tuple[float, float, float]
+    rotational_inertia: float
+    node_masses: Dict[Any, Tuple[float, float]] = field(default_factory=dict)
+
+
 @dataclass
 class MassSourceResult:
     """
@@ -222,6 +250,8 @@ class MassSourceResult:
         Global centroid of inertial mass (X_cm, Y_cm, Z_cm).
     story_masses : Dict[float, float]
         Total lumped mass mapped to each story elevation.
+    diaphragm_masses : Dict[str, DiaphragmMassSummary]
+        Read-only mass, center of mass, and rotational inertia summary for each rigid diaphragm.
     mass_source : MassSource
         The source configuration used for evaluation.
     """
@@ -231,6 +261,7 @@ class MassSourceResult:
     total_mass: float = 0.0
     center_of_mass: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     story_masses: Dict[float, float] = field(default_factory=dict)
+    diaphragm_masses: Dict[str, DiaphragmMassSummary] = field(default_factory=dict)
     mass_source: Optional[MassSource] = None
     gravity_accel: float = 9.80665
     messages: List[str] = field(default_factory=list)
@@ -239,6 +270,98 @@ class MassSourceResult:
     def story_weights(self) -> Dict[float, float]:
         """Effective seismic weights mapped to each story elevation."""
         return {elev: m * self.gravity_accel for elev, m in self.story_masses.items()}
+
+
+def _element_half_masses(
+    elements: Any,
+    nodes_map: Dict[Any, Any],
+    element_masses: Dict[Any, float],
+    include_element_mass: bool,
+    materials_map: Dict[Any, Any],
+    sections_map: Dict[Any, Any],
+    active_units: Units,
+    gravity_accel: float,
+) -> Dict[Any, float]:
+    """Lump half of each element's self and extra mass to its start and end nodes (matching fem3d)."""
+    half_masses: Dict[Any, float] = {nid: 0.0 for nid in nodes_map}
+    for e in elements:
+        if e.start_node not in nodes_map or e.end_node not in nodes_map:
+            continue
+        n_i = nodes_map[e.start_node]
+        n_j = nodes_map[e.end_node]
+        L = math.sqrt(
+            (n_j.x - n_i.x) ** 2
+            + (n_j.y - n_i.y) ** 2
+            + (getattr(n_j, "z", 0.0) - getattr(n_i, "z", 0.0)) ** 2
+        )
+        if L <= 1e-12:
+            continue
+
+        e_extra_m = element_masses.get(e.id, 0.0)
+        e_self_m = 0.0
+        if include_element_mass and str(getattr(e, "type", "")).lower() != "spring":
+            sec_id = getattr(e, "section_id", None)
+            sec = sections_map.get(sec_id)
+            if sec is None:
+                raise ValueError(f"Element {e.id!r} references missing section {sec_id!r}.")
+            mat_id = getattr(sec, "material_id", None)
+            mat = materials_map.get(mat_id)
+            if mat is None:
+                raise ValueError(f"Section {sec.id!r} on element {e.id!r} references missing material {mat_id!r}.")
+            e_self_m = element_mass_per_length(e, sec, mat, active_units, gravity_accel)
+
+        half_m = 0.5 * (e_self_m + e_extra_m) * L
+        if half_m > 0.0:
+            half_masses[e.start_node] += half_m
+            half_masses[e.end_node] += half_m
+    return half_masses
+
+
+def nodal_lumped_masses(
+    model: Union[StructuralModel, Project],
+    mass_source_result: Optional[MassSourceResult] = None,
+    *,
+    units: Optional[Union[str, Units, dict]] = None,
+    gravity_accel: Optional[float] = None,
+) -> Dict[Any, Tuple[float, float, float]]:
+    """
+    Return total assembled lumped mass ``(mx, my, mz)`` at each node ID, combining
+    ``MassSourceResult.nodal_masses`` with incident frame/truss element half-masses.
+    """
+    raw_model = model.model if isinstance(model, Project) else model
+    if units is None:
+        if isinstance(model, Project):
+            units = getattr(model, "units", None) or getattr(getattr(model, "metadata", None), "units", None)
+        if units is None:
+            units = getattr(raw_model, "units", None)
+    active_units = parse_units(units)
+    if gravity_accel is None:
+        gravity_accel = mass_source_result.gravity_accel if mass_source_result is not None else active_units.gravity_acceleration
+    if mass_source_result is None:
+        mass_source_result = calculate_mass_source(raw_model, gravity_accel=gravity_accel, units=active_units)
+
+    nodes_map = {n.id: n for n in raw_model.nodes}
+    materials_map = {m.id: m for m in raw_model.materials}
+    sections_map = {s.id: s for s in raw_model.sections}
+    ms = mass_source_result.mass_source
+    include_elem = bool(ms.include_element_mass) if ms is not None else True
+
+    half_masses = _element_half_masses(
+        raw_model.elements,
+        nodes_map,
+        mass_source_result.element_masses,
+        include_elem,
+        materials_map,
+        sections_map,
+        active_units,
+        gravity_accel,
+    )
+    out: Dict[Any, Tuple[float, float, float]] = {}
+    for nid in nodes_map:
+        mx, my, mz = mass_source_result.nodal_masses.get(nid, (0.0, 0.0, 0.0))
+        hm = half_masses.get(nid, 0.0)
+        out[nid] = (mx + hm, my + hm, mz + hm)
+    return out
 
 
 def calculate_mass_source(
@@ -740,6 +863,90 @@ def calculate_mass_source(
     # Clean dict output for nodal masses (tuple format)
     nodal_tuples = {nid: (vec[0], vec[1], vec[2]) for nid, vec in nodal_masses.items()}
 
+    # 7. Read-only rigid diaphragm mass, COM, and rotational inertia summaries (T^T M T)
+    diaphragm_masses: Dict[str, DiaphragmMassSummary] = {}
+    diaphragms = getattr(model, "diaphragms", None) or []
+    if diaphragms:
+        half_masses = _element_half_masses(
+            model.elements,
+            nodes_map,
+            element_masses,
+            bool(ms.include_element_mass),
+            materials_map,
+            sections_map,
+            active_units,
+            gravity_accel,
+        )
+        for d in diaphragms:
+            axis = str(getattr(d, "axis", "Z")).upper()
+            if axis not in _DIAPHRAGM_AXIS_MAP:
+                continue
+            (a_attr, b_attr), n_attr, (i1, i2), rot_idx = _DIAPHRAGM_AXIS_MAP[axis]
+            valid_nids = [nid for nid in dict.fromkeys(d.node_ids) if nid in nodes_map]
+            if not valid_nids:
+                continue
+
+            x1_vals: List[float] = []
+            x2_vals: List[float] = []
+            x3_vals: List[float] = []
+            m1_vals: List[float] = []
+            m2_vals: List[float] = []
+            iz_vals: List[float] = []
+            node_mass_map: Dict[Any, Tuple[float, float]] = {}
+
+            for nid in valid_nids:
+                nd = nodes_map[nid]
+                x1_vals.append(float(getattr(nd, a_attr)))
+                x2_vals.append(float(getattr(nd, b_attr)))
+                x3_vals.append(float(getattr(nd, n_attr)))
+
+                base_m = nodal_tuples.get(nid, (0.0, 0.0, 0.0))
+                hm = half_masses.get(nid, 0.0)
+                tot_xyz = (base_m[0] + hm, base_m[1] + hm, base_m[2] + hm)
+                m1_i = tot_xyz[i1]
+                m2_i = tot_xyz[i2]
+                m1_vals.append(m1_i)
+                m2_vals.append(m2_i)
+                node_mass_map[nid] = (m1_i, m2_i)
+
+                it_val = getattr(nd, "inertia", 0.0) if ms.include_added_mass else 0.0
+                if isinstance(it_val, (list, tuple)):
+                    it_raw = float(it_val[rot_idx]) if rot_idx < len(it_val) else 0.0
+                else:
+                    it_raw = float(it_val or 0.0)
+                iz_vals.append(max(0.0, it_raw) * mass_factor)
+
+            mass_1 = sum(m1_vals)
+            mass_2 = sum(m2_vals)
+            n_pts = len(valid_nids)
+            x1_cm = sum(m2 * x1 for m2, x1 in zip(m2_vals, x1_vals)) / mass_2 if mass_2 > 0.0 else sum(x1_vals) / n_pts
+            x2_cm = sum(m1 * x2 for m1, x2 in zip(m1_vals, x2_vals)) / mass_1 if mass_1 > 0.0 else sum(x2_vals) / n_pts
+            x3_cm = sum(x3_vals) / n_pts
+
+            rot_inertia = sum(
+                iz + m1 * ((x2 - x2_cm) ** 2) + m2 * ((x1 - x1_cm) ** 2)
+                for iz, m1, m2, x1, x2 in zip(iz_vals, m1_vals, m2_vals, x1_vals, x2_vals)
+            )
+            if axis == "Z":
+                d_cm = (x1_cm, x2_cm, x3_cm)
+            elif axis == "X":
+                d_cm = (x3_cm, x1_cm, x2_cm)
+            else:  # "Y"
+                d_cm = (x2_cm, x3_cm, x1_cm)
+
+            eff_mass = 0.5 * (mass_1 + mass_2)
+            diaphragm_masses[str(d.id)] = DiaphragmMassSummary(
+                diaphragm_id=str(d.id),
+                axis=axis,
+                mass=eff_mass,
+                mass_1=mass_1,
+                mass_2=mass_2,
+                weight=eff_mass * gravity_accel,
+                center_of_mass=d_cm,
+                rotational_inertia=rot_inertia,
+                node_masses=node_mass_map,
+            )
+
     return MassSourceResult(
         nodal_masses=nodal_tuples,
         element_masses=element_masses,
@@ -747,6 +954,7 @@ def calculate_mass_source(
         total_mass=total_inertial_mass,
         center_of_mass=(cm_x, cm_y, cm_z),
         story_masses=story_masses,
+        diaphragm_masses=diaphragm_masses,
         mass_source=ms,
         gravity_accel=gravity_accel,
         messages=list(ms_messages),

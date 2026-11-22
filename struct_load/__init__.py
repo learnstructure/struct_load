@@ -55,9 +55,11 @@ from .engine.geometry import (
     resolve_base_elevation,
 )
 from .engine.mass_source import (
+    DiaphragmMassSummary,
     MassSourceResult,
     calculate_mass_source,
     create_asce7_mass_source,
+    nodal_lumped_masses,
 )
 from .engine.self_weight import (
     apply_self_weight,
@@ -139,5 +141,7 @@ __all__ = [
     "apply_floor_load_to_frame",
     "calculate_mass_source",
     "create_asce7_mass_source",
+    "nodal_lumped_masses",
+    "DiaphragmMassSummary",
     "MassSourceResult",
 ]
