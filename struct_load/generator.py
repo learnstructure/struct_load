@@ -390,6 +390,56 @@ class LoadGenerator:
             tolerance=tolerance,
         )
 
+    def _story_weights_from_mass_source(
+        self,
+        model: StructuralModel,
+        ms_res: MassSourceResult,
+        elevations: List[float],
+        *,
+        base_elevation: Optional[float] = None,
+    ) -> List[float]:
+        """Aggregate nodal seismic weights from ``ms_res`` onto ``elevations``, excluding restrained base."""
+        if not elevations:
+            return []
+        from struct_core import vertical_axis as get_vertical_axis
+
+        v_axis = get_vertical_axis(model)
+        active_units = self.get_units(model)
+
+        base_elev_val: Optional[float] = None
+        if base_elevation is not None:
+            base_elev_val = float(base_elevation)
+        elif getattr(model, "base_elevation", None) is not None:
+            base_elev_val = float(model.base_elevation)
+        elif getattr(model, "supports", None):
+            base_elev_val = resolve_base_elevation(model, messages=self.messages)
+
+        exclude_base_bucket = (
+            base_elev_val is not None
+            and not any(abs(e - base_elev_val) <= 1e-9 for e in elevations)
+        )
+
+        node_tot = nodal_lumped_masses(
+            model, ms_res, units=active_units, gravity_accel=ms_res.gravity_accel
+        )
+        lateral_only = bool(getattr(ms_res.mass_source, "lateral_only", False))
+        story_weights = [0.0] * len(elevations)
+
+        for nd in model.nodes:
+            m_vec = node_tot.get(nd.id, (0.0, 0.0, 0.0))
+            m_eff = float(m_vec[0]) if lateral_only else float(max(m_vec))
+            if m_eff <= 0.0:
+                continue
+            z_val = float(getattr(nd, "z", 0.0)) if v_axis == "z" else float(nd.y)
+            diffs = [abs(z_val - elev) for elev in elevations]
+            min_diff = min(diffs)
+            if exclude_base_bucket and abs(z_val - base_elev_val) <= min_diff + 1e-12:
+                continue
+            idx = int(diffs.index(min_diff))
+            story_weights[idx] += m_eff * ms_res.gravity_accel
+
+        return [round(w, 2) for w in story_weights]
+
     def calculate_model_seismic_weight(
         self,
         model: StructuralModel,
@@ -406,28 +456,18 @@ class LoadGenerator:
         base_elevation: Optional[float] = None,
     ) -> List[float]:
         """
-        Compute deterministic story seismic weights W_i per ASCE 7-22 Section 12.7.2:
-        1. Dead load (structural self-weight & superimposed dead): 100% (factor = 1.0).
-        2. Storage live load: minimum 25% (factor = 0.25) per Section 12.7.2 Item 1.
-           Note: Public garages and open parking structures are excluded (0%).
-           General floor live load (office, residential, etc.) is 0% per Section 12.7.2.
-        3. Partitions: 100% (factor = 1.0) per Section 12.7.2 Item 2.
-        4. Permanent operating equipment: 100% (factor = 1.0) per Section 12.7.2 Item 3.
-        5. Snow load: 15% where flat roof snow load Pf > 45 psf (2.16 kN/m^2) per Section 12.7.2 Item 4.
+        Compute deterministic story seismic weights W_i per ASCE 7-22 Section 12.7.2 using the
+        same seismic mass definition as ``create_asce7_mass_source`` and ``calculate_mass_source``
+        (including element self-mass, shell self-mass, assigned nodal/element added masses, and
+        qualifying dead, storage live, partition, equipment, and snow loads).
 
         Mass lumped at the restrained base carries no seismic inertia force and is excluded from
         above-base story weights (unless ``base_elevation`` is itself included in ``elevations``).
         """
-        from struct_core import vertical_axis as get_vertical_axis
-        v_axis = get_vertical_axis(model)
-        is_3d = detect_model_dimensionality(model, tolerance=tolerance) == "3d"
-        nodes_map = {n.id: n for n in model.nodes}
+        if not elevations:
+            return []
+
         active_units = self.get_units(model)
-
-        from struct_core import conversion_factor
-        threshold_snow = 2.16 * conversion_factor("kN, m", active_units, "pressure")
-        snow_factor = 0.15 if flat_roof_snow_pressure > (threshold_snow - 1e-6) else 0.0
-
         base_elev_val: Optional[float] = None
         if base_elevation is not None:
             base_elev_val = float(base_elevation)
@@ -436,228 +476,29 @@ class LoadGenerator:
         elif getattr(model, "supports", None):
             base_elev_val = resolve_base_elevation(model, messages=self.messages)
 
-        exclude_base_bucket = (
-            base_elev_val is not None
-            and not any(abs(e - base_elev_val) <= 1e-9 for e in elevations)
+        asce7_ms = create_asce7_mass_source(
+            model,
+            storage_live_case_ids=storage_live_cases,
+            partition_load_case_ids=partition_cases,
+            snow_load_case_ids=snow_cases,
+            flat_roof_snow_pressure=flat_roof_snow_pressure,
+            equipment_case_ids=equipment_cases,
+            include_general_live=include_general_live,
+            general_live_case_ids=general_live_cases,
+            general_live_factor=general_live_factor,
+            include_element_mass=True,
+            include_added_mass=True,
+            units=active_units,
         )
-
-        n_stories = len(elevations)
-        story_weights = [0.0] * n_stories
-
-        # Helper to find closest story index (returns None when weight lands at the restrained base)
-        def _closest_story_idx(z_val: float) -> Optional[int]:
-            diffs = [abs(z_val - elev) for elev in elevations]
-            min_diff = min(diffs)
-            if exclude_base_bucket and abs(z_val - base_elev_val) <= min_diff + 1e-12:
-                return None
-            return int(diffs.index(min_diff))
-
-        all_cases = {lc.id: lc for lc in model.load_cases}
-
-        # 1. Dead load cases (factor 1.0)
-        dead_cids = [
-            cid for cid in all_cases
-            if any(tag in str(cid).lower() for tag in ("dead", "sw", "sdl"))
-        ]
-
-        # 2. Storage live load cases (factor 0.25)
-        if storage_live_cases is not None:
-            storage_cids = [cid for cid in storage_live_cases if cid in all_cases]
-        else:
-            storage_cids = [
-                cid for cid in all_cases
-                if any(tag in str(cid).lower() for tag in ("storage", "stor"))
-            ]
-
-        # 3. Partition cases (factor 1.0)
-        if partition_cases is not None:
-            part_cids = [cid for cid in partition_cases if cid in all_cases]
-        else:
-            part_cids = [
-                cid for cid in all_cases
-                if any(tag in str(cid).lower() for tag in ("partition", "part"))
-            ]
-
-        # 4. Equipment cases (factor 1.0)
-        if equipment_cases is not None:
-            equip_cids = [cid for cid in equipment_cases if cid in all_cases]
-        else:
-            equip_cids = [
-                cid for cid in all_cases
-                if any(tag in str(cid).lower() for tag in ("equip", "mep"))
-            ]
-
-        # 5. Snow cases (factor 0.15 if Pf > 45 psf / 2.16 kPa, else 0.0)
-        if snow_cases is not None:
-            snow_cids = [cid for cid in snow_cases if cid in all_cases]
-        else:
-            snow_cids = [
-                cid for cid in all_cases
-                if any(tag in str(cid).lower() for tag in ("snow",))
-            ]
-
-        # 6. General live cases (0.0 unless include_general_live is True)
-        gen_cids = []
-        if include_general_live and general_live_factor > 0.0:
-            if general_live_cases is not None:
-                gen_cids = [cid for cid in general_live_cases if cid in all_cases]
-            else:
-                storage_set = set(storage_cids)
-                gen_cids = [
-                    cid for cid in all_cases
-                    if any(tag in str(cid).lower() for tag in ("live", "ll"))
-                    and cid not in storage_set
-                    and not any(tag in str(cid).lower() for tag in ("roof", "lr", "storage", "stor"))
-                ]
-
-        weighted_cases: List[Tuple[LoadCase, float, bool]] = []
-        for cid in dead_cids:
-            weighted_cases.append((all_cases[cid], 1.0, True))
-        for cid in storage_cids:
-            weighted_cases.append((all_cases[cid], 0.25, False))
-        for cid in part_cids:
-            weighted_cases.append((all_cases[cid], 1.0, False))
-        for cid in equip_cids:
-            weighted_cases.append((all_cases[cid], 1.0, False))
-        if snow_factor > 0.0:
-            for cid in snow_cids:
-                weighted_cases.append((all_cases[cid], snow_factor, False))
-        if gen_cids and general_live_factor > 0.0:
-            for cid in gen_cids:
-                weighted_cases.append((all_cases[cid], general_live_factor, False))
-
-        # Track elements with explicit dead load
-        loaded_elements: Set[Any] = set()
-        # Shell elements whose self-weight is already in a dead case (self-weight shell loads)
-        shells_with_self_weight: Set[Any] = set()
-        shell_trib = shell_tributary(model) if model.shell_elements else {}
-
-        def _add_shell_weight(eid: Any, total: float) -> None:
-            """Add a shell element's weight to the stories of its nodes, in the shares of CSI §10.11."""
-            _, shares = shell_trib[eid]
-            for nid, frac in shares:
-                node = nodes_map[nid]
-                node_z = getattr(node, "z", 0.0) if v_axis == "z" else node.y
-                idx = _closest_story_idx(node_z)
-                if idx is not None:
-                    story_weights[idx] += total * frac
-
-        for lc, c_scale, marks_dead in weighted_cases:
-            if c_scale <= 0.0:
-                continue
-            # Distributed line loads
-            for dl in lc.element_loads:
-                elem = next((e for e in model.elements if e.id == dl.element_id), None)
-                if not elem:
-                    continue
-                if marks_dead and getattr(dl, "is_self_weight", False):
-                    loaded_elements.add(elem.id)
-                length = get_beam_length(elem, nodes_map)
-
-                # Total vertical downward magnitude
-                w_vert = abs(dl.wz) if v_axis == "z" else abs(dl.wy)
-                if w_vert < 1e-6:
-                    w_vert = math.sqrt(dl.wx ** 2 + dl.wy ** 2 + dl.wz ** 2)
-
-                load_mag = w_vert * length * c_scale
-
-                # Distribute to stories:
-                if is_horizontal_beam(elem, nodes_map, is_3d=is_3d, tolerance=tolerance, vertical_axis=v_axis):
-                    elev = get_beam_elevation(elem, nodes_map, is_3d=is_3d, vertical_axis=v_axis)
-                    idx = _closest_story_idx(elev)
-                    if idx is not None:
-                        story_weights[idx] += load_mag
-                else:
-                    # Vertical or inclined member: split between top and bottom story
-                    n_start = nodes_map[elem.start_node]
-                    n_end = nodes_map[elem.end_node]
-                    z1 = getattr(n_start, "z", 0.0) if v_axis == "z" else n_start.y
-                    z2 = getattr(n_end, "z", 0.0) if v_axis == "z" else n_end.y
-                    idx1 = _closest_story_idx(z1)
-                    idx2 = _closest_story_idx(z2)
-                    if idx1 is not None:
-                        story_weights[idx1] += 0.5 * load_mag
-                    if idx2 is not None:
-                        story_weights[idx2] += 0.5 * load_mag
-
-            # Uniform loads on shell elements (load per area x element area)
-            for sl in getattr(lc, "shell_loads", []):
-                for eid in sl.element_ids:
-                    if eid not in shell_trib:
-                        raise ValueError(f"Shell load in load case {lc.id!r} references missing shell element "
-                                         f"{eid!r}.")
-                    if marks_dead and sl.is_self_weight:
-                        shells_with_self_weight.add(eid)
-                    _add_shell_weight(eid, abs(float(sl.pressure)) * shell_trib[eid][0] * c_scale)
-
-            # Point loads
-            for pl in lc.point_loads:
-                node = nodes_map.get(pl.node_id)
-                if not node:
-                    continue
-                node_z = getattr(node, "z", 0.0) if v_axis == "z" else node.y
-                p_vert = abs(pl.fz) if v_axis == "z" else abs(pl.fy)
-                if p_vert < 1e-6:
-                    p_vert = math.sqrt(pl.fx ** 2 + pl.fy ** 2 + pl.fz ** 2)
-                idx = _closest_story_idx(node_z)
-                if idx is not None:
-                    story_weights[idx] += p_vert * c_scale
-
-        # 2. Check if self-weight was already accounted for in loaded_elements.
-        # If not, add section self-weight for remaining elements
-        materials_map = {m.id: m for m in model.materials}
-        sections_map = {s.id: s for s in model.sections}
-        g_accel = active_units.gravity_acceleration
-
-        for elem in model.elements:
-            if elem.id in loaded_elements:
-                continue
-            if str(getattr(elem, "type", "")).lower() == "spring":
-                continue
-            sec_id = getattr(elem, "section_id", None)
-            sec = sections_map.get(sec_id)
-            if sec is None:
-                raise ValueError(f"Element {elem.id!r} references missing section {sec_id!r}.")
-            mat_id = getattr(sec, "material_id", None)
-            mat = materials_map.get(mat_id)
-            if mat is None:
-                raise ValueError(f"Section {sec.id!r} on element {elem.id!r} references missing material {mat_id!r}.")
-
-            area = calculate_section_area(sec)
-            if area <= 0.0:
-                continue
-
-            # Seismic weight = mass x g: the element's mass modifier applies (as in the CSI mass source)
-            g_accel = active_units.gravity_acceleration
-            w_unit = element_mass_per_length(elem, sec, mat, active_units, g_accel) * g_accel
-
-            length = get_beam_length(elem, nodes_map)
-            total_w = float(w_unit) * length
-
-            if is_horizontal_beam(elem, nodes_map, is_3d=is_3d, tolerance=tolerance, vertical_axis=v_axis):
-                elev = get_beam_elevation(elem, nodes_map, is_3d=is_3d, vertical_axis=v_axis)
-                idx = _closest_story_idx(elev)
-                if idx is not None:
-                    story_weights[idx] += total_w
-            else:
-                n_start = nodes_map[elem.start_node]
-                n_end = nodes_map[elem.end_node]
-                z1 = getattr(n_start, "z", 0.0) if v_axis == "z" else n_start.y
-                z2 = getattr(n_end, "z", 0.0) if v_axis == "z" else n_end.y
-                idx1 = _closest_story_idx(z1)
-                idx2 = _closest_story_idx(z2)
-                if idx1 is not None:
-                    story_weights[idx1] += 0.5 * total_w
-                if idx2 is not None:
-                    story_weights[idx2] += 0.5 * total_w
-
-        # 3. Self-weight of shell elements not already carried by a dead case (CSI Analysis Reference Manual §10.12)
-        if shell_trib:
-            for eid, w_area in shell_self_weights(model, active_units).items():
-                if eid not in shells_with_self_weight:
-                    _add_shell_weight(eid, w_area * shell_trib[eid][0])
-
-        return [round(w, 2) for w in story_weights]
+        ms_res = calculate_mass_source(
+            model,
+            mass_source=asce7_ms,
+            units=active_units,
+            base_elevation=base_elev_val,
+        )
+        return self._story_weights_from_mass_source(
+            model, ms_res, elevations, base_elevation=base_elev_val
+        )
 
     def apply_lateral_seismic(
         self,
@@ -762,7 +603,7 @@ class LoadGenerator:
             )
         elevations = [float(s.elevation) for s in story_list]
 
-        # Calculate exact story weights from explicit input, mass source, or dead loads
+        # Calculate exact story weights from explicit input, mass source, or MS_ASCE7
         ms_res: Optional[MassSourceResult] = None
         if story_weights is not None:
             exact_weights = list(story_weights)
@@ -771,29 +612,44 @@ class LoadGenerator:
             ms_res = calculate_mass_source(
                 model, mass_source=ms_target, units=active_units, base_elevation=base_elev
             )
-            exact_weights = [round(ms_res.story_weights.get(elev, 0.0), 2) for elev in elevations]
+            exact_weights = self._story_weights_from_mass_source(
+                model, ms_res, elevations, base_elevation=base_elev
+            )
             if sum(exact_weights) <= 1e-3:
-                ms_res = None
-                exact_weights = self.calculate_model_seismic_weight(
+                asce7_ms = create_asce7_mass_source(
                     model,
-                    elevations,
-                    storage_live_cases=storage_live_cases,
-                    partition_cases=partition_cases,
-                    snow_cases=snow_cases,
+                    storage_live_case_ids=storage_live_cases,
+                    partition_load_case_ids=partition_cases,
+                    snow_load_case_ids=snow_cases,
                     flat_roof_snow_pressure=flat_roof_snow_pressure,
-                    equipment_cases=equipment_cases,
-                    base_elevation=base_elev,
+                    equipment_case_ids=equipment_cases,
+                    include_element_mass=True,
+                    include_added_mass=True,
+                    units=active_units,
+                )
+                ms_res = calculate_mass_source(
+                    model, mass_source=asce7_ms, units=active_units, base_elevation=base_elev
+                )
+                exact_weights = self._story_weights_from_mass_source(
+                    model, ms_res, elevations, base_elevation=base_elev
                 )
         else:
-            exact_weights = self.calculate_model_seismic_weight(
+            asce7_ms = create_asce7_mass_source(
                 model,
-                elevations,
-                storage_live_cases=storage_live_cases,
-                partition_cases=partition_cases,
-                snow_cases=snow_cases,
+                storage_live_case_ids=storage_live_cases,
+                partition_load_case_ids=partition_cases,
+                snow_load_case_ids=snow_cases,
                 flat_roof_snow_pressure=flat_roof_snow_pressure,
-                equipment_cases=equipment_cases,
-                base_elevation=base_elev,
+                equipment_case_ids=equipment_cases,
+                include_element_mass=True,
+                include_added_mass=True,
+                units=active_units,
+            )
+            ms_res = calculate_mass_source(
+                model, mass_source=asce7_ms, units=active_units, base_elevation=base_elev
+            )
+            exact_weights = self._story_weights_from_mass_source(
+                model, ms_res, elevations, base_elevation=base_elev
             )
 
         # Ensure model has defined dead loads/sections

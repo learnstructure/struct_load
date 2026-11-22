@@ -369,3 +369,62 @@ def test_no_diaphragm_identity_and_mixed_floor_elf(dist: str):
     f1_pts_x = [pl for pl in cases_m[0].point_loads if pl.node_id in (101, 102, 111, 112)]
     y_res_f1 = sum(nodes_by_id[pl.node_id].y * pl.fx for pl in f1_pts_x) / sum(pl.fx for pl in f1_pts_x)
     assert y_res_f1 == pytest.approx(ms_res.diaphragm_masses["D1"].center_of_mass[1], rel=1e-12)
+
+
+def test_elf_without_mass_source_matches_asce7_mass_source_with_nodal_masses():
+    """
+    Regression check: calculate_model_seismic_weight and apply_lateral_seismic without an explicit
+    mass source must count Node.mass identically to MS_ASCE7, so ELF total weight equals the
+    MS_ASCE7 story weight and the diaphragm resultant acts at the true center of mass.
+    """
+    from struct_load import create_asce7_mass_source
+
+    proj = _asymmetric_2story_project(with_diaphragms=True)
+    model = proj.model
+    assert model.mass_source is None
+
+    # Use single-story subset or full 2-story asymmetric model with heavy Node.mass + element self-weight + DEAD loads
+    gen = LoadGenerator(units="kN, m")
+    elevations = [3.5, 7.0]
+    w_elf = gen.calculate_model_seismic_weight(model, elevations, base_elevation=0.0)
+
+    asce7_ms = create_asce7_mass_source(model, units="kN, m")
+    ms_res = calculate_mass_source(model, mass_source=asce7_ms, units="kN, m", base_elevation=0.0)
+    for k, elev in enumerate(elevations):
+        assert w_elf[k] == pytest.approx(round(ms_res.story_weights[elev], 2), abs=1e-9)
+
+    params = SeismicParameters(sds=0.80, sd1=0.45, site_class="D", risk_category="II", system_type="rc_smf")
+    (case_x, case_y), elf_res = gen.apply_lateral_seismic(proj, params=params, direction="both")
+    assert elf_res.total_weight == pytest.approx(sum(round(ms_res.story_weights[e], 2) for e in elevations), abs=1e-9)
+
+    nodes_by_id = {n.id: n for n in model.nodes}
+    for k, (elev, did) in enumerate(((3.5, "D1"), (7.0, "D2")), start=1):
+        cm_x, cm_y, _ = ms_res.diaphragm_masses[did].center_of_mass
+        pls_x = [pl for pl in case_x.point_loads if abs(nodes_by_id[pl.node_id].z - elev) < 1e-6]
+        pls_y = [pl for pl in case_y.point_loads if abs(nodes_by_id[pl.node_id].z - elev) < 1e-6]
+        fx_sum = sum(pl.fx for pl in pls_x)
+        fy_sum = sum(pl.fy for pl in pls_y)
+        assert fx_sum == pytest.approx(elf_res.story_forces[k], rel=1e-12)
+        assert fy_sum == pytest.approx(elf_res.story_forces[k], rel=1e-12)
+        y_res = sum(nodes_by_id[pl.node_id].y * pl.fx for pl in pls_x) / fx_sum
+        x_res = sum(nodes_by_id[pl.node_id].x * pl.fy for pl in pls_y) / fy_sum
+        assert y_res == pytest.approx(cm_y, rel=1e-12)
+        assert x_res == pytest.approx(cm_x, rel=1e-12)
+
+    # Also verify a model whose seismic weight comes solely from Node.mass (massless frame, no dead loads)
+    proj_added_only = _asymmetric_2story_project(with_diaphragms=True, use_dead_case_for_mass=False)
+    for mat in proj_added_only.model.materials:
+        mat.unit_weight = 0.0
+    proj_added_only.model.load_cases = []
+    (cx_only, _), elf_only = LoadGenerator(units="kN, m").apply_lateral_seismic(
+        proj_added_only, params=params, direction="both"
+    )
+    ms_only = calculate_mass_source(
+        proj_added_only, mass_source=create_asce7_mass_source(proj_added_only.model, units="kN, m"),
+        units="kN, m", base_elevation=0.0,
+    )
+    assert elf_only.total_weight == pytest.approx(
+        round(ms_only.story_weights[3.5], 2) + round(ms_only.story_weights[7.0], 2),
+        abs=1e-9,
+    )
+    assert len(cx_only.point_loads) == 8
