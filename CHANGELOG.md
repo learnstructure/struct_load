@@ -27,6 +27,17 @@ All notable changes to `struct_load` are recorded in this file. The format follo
   `tests/test_geometry_3d.py`, `tests/test_mass_source.py`.
 
 ### Added
+- **Rigid floor diaphragms & unified ELF seismic weight (`fem3d/DIAPHRAGM_PLAN.md`, M3 & pre-M4):**
+  - `LoadGenerator.apply_lateral_seismic` distributes ELF story forces in proportion to nodal seismic mass on rigid
+    Z-diaphragm floors so the resultant acts at the floor center of mass (ASCE 7-22 §12.8.4.1), while floors
+    without diaphragms retain the existing `face` / `uniform` distribution unchanged.
+  - `calculate_mass_source` and `calculate_model_seismic_weight` keep identical values with or without diaphragms and
+    expose read-only `DiaphragmMassSummary` (`MassSourceResult.diaphragm_masses`) and `nodal_lumped_masses()` matching
+    `fem3d`'s `T^T M T` master mass, center of mass, and rotational inertia across `Z`, `X`, and `Y` planes and
+    `lateral_only=True`/`False`.
+  - Unified `LoadGenerator.calculate_model_seismic_weight` and `apply_lateral_seismic` to compute story weights `W_x`
+    and diaphragm nodal mass proportions from the same ASCE 7-22 seismic mass definition as `create_asce7_mass_source`
+    (`MS_ASCE7`) / `calculate_mass_source` when `Node.mass` is present. Tests: `tests/test_diaphragms.py`.
 - `LoadGenerator.messages`: `generate_combinations` now records every load case left out of the generated ASCE 7-22
   combinations (`other`, `temperature`, `soil`, `fluid`, `partition`, and extra cases beyond one per direction for
   wind, seismic, snow, or roof live), with its ID, type, and reason. Test: `tests/test_generator.py`.
